@@ -281,7 +281,8 @@ def main() -> None:
     print("=" * 54)
     print("  Coordinates: col 1-5 left→right, row 1-5 bottom→up")
     print("  Oracle input:  <letter> <col>,<row>   e.g.  l 3,4")
-    print("  Commands:  'grid'  'mode'  'quit'")
+    print("  Delete cell:   . <col>,<row>  or  del <col>,<row>")
+    print("  Commands:  grid | mode | undo | quit")
     print("=" * 54 + "\n")
 
     words = load_words()
@@ -290,6 +291,7 @@ def main() -> None:
     revealed: dict[tuple[int, int], str] = {}
     excluded: set[str] = set()
     sort_mode = SORT_MODES[0]
+    history: list[dict[tuple[int, int], str]] = []   # undo stack
 
     # --- Excluded letter ---
     while True:
@@ -299,7 +301,8 @@ def main() -> None:
             break
         print("  Please enter a single letter (a-z).")
 
-    words = filter_words(words, revealed, excluded)
+    all_words = filter_words(words, revealed, excluded)   # full list, post-exclusion
+    words = all_words
     print_grid(revealed)
     print_state(words, revealed, excluded, sort_mode)
 
@@ -313,7 +316,7 @@ def main() -> None:
             break
 
         print()
-        inp = prompt(f"Oracle report (letter col,row) | grid | mode | quit : ")
+        inp = prompt("Oracle report (letter col,row) | . col,row | grid | mode | undo | quit : ")
 
         if inp in ("quit", "q", "exit"):
             break
@@ -330,35 +333,74 @@ def main() -> None:
             print_state(words, revealed, excluded, sort_mode)
             continue
 
-        parts = inp.split()
-        if len(parts) != 2 or not parts[0].isalpha() or len(parts[0]) != 1:
-            print("  Format: <letter> <col>,<row>  e.g.  l 3,4")
+        if inp == "undo":
+            if not history:
+                print("  Nothing to undo.")
+            else:
+                revealed = history.pop()
+                words = filter_words(all_words, revealed, excluded)
+                print("  Undone.")
+                print_grid(revealed)
+                print_state(words, revealed, excluded, sort_mode)
             continue
 
-        letter = parts[0]
+        parts = inp.split()
+        if len(parts) != 2:
+            print("  Format: <letter> <col>,<row>  e.g.  l 3,4  |  delete: . <col>,<row>")
+            continue
+
+        cmd, coord = parts[0], parts[1]
+
+        # --- Delete command: ". col,row" or "del col,row" or "delete col,row" ---
+        if cmd in (".", "del", "delete"):
+            try:
+                cell = parse_cell(coord)
+            except ValueError as e:
+                print(f"  Error: {e}")
+                continue
+            if cell not in revealed:
+                print(f"  {cell_label(cell)} is already empty.")
+                continue
+            history.append(dict(revealed))
+            removed = revealed.pop(cell)
+            print(f"  Removed {removed.upper()} from {cell_label(cell)}.")
+            words = filter_words(all_words, revealed, excluded)
+            print_grid(revealed)
+            print_state(words, revealed, excluded, sort_mode)
+            continue
+
+        # --- Oracle letter report ---
+        if not cmd.isalpha() or len(cmd) != 1:
+            print("  Format: <letter> <col>,<row>  e.g.  l 3,4  |  delete: . <col>,<row>")
+            continue
+
+        letter = cmd
         if letter in excluded:
             print(f"  '{letter.upper()}' is the excluded letter — not in the grid.")
             continue
 
         try:
-            cell = parse_cell(parts[1])
+            cell = parse_cell(coord)
         except ValueError as e:
             print(f"  Error: {e}")
             continue
 
-        # Each letter appears once in the grid: remove any previous cell for this letter.
+        # Push undo snapshot before any mutation.
+        history.append(dict(revealed))
+
+        # Each letter appears once: remove its previous cell if it moved.
         old_cell = next((c for c, l in revealed.items() if l == letter), None)
         if old_cell is not None and old_cell != cell:
             print(f"  Note: {letter.upper()} moved from {cell_label(old_cell)} to {cell_label(cell)}.")
             del revealed[old_cell]
 
-        # Warn if a different letter was already recorded at this cell.
+        # Warn if a different letter was already at this cell.
         if cell in revealed and revealed[cell] != letter:
             print(f"  Warning: {cell_label(cell)} was '{revealed[cell].upper()}', "
                   f"now overwritten with '{letter.upper()}'.")
 
         revealed[cell] = letter
-        words = filter_words(words, revealed, excluded)
+        words = filter_words(all_words, revealed, excluded)
         print_grid(revealed)
         print_state(words, revealed, excluded, sort_mode)
 
