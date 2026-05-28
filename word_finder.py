@@ -11,7 +11,7 @@ Coordinate convention (user-facing):
   col increases 1→5 left to right
   row increases 1→5 bottom to top
   So top-left corner of grid is (col=1, row=5).
-  Oracle input format:  <letter> <col>,<row>   e.g.  l 3,4
+  Oracle input format:  <letter> <col>,<row>   e.g.  m 3,4
 """
 
 import csv
