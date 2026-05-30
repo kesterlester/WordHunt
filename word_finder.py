@@ -293,6 +293,25 @@ def letter_freq_stats(
     return counter
 
 
+def letter_zipf_stats(
+    words: list[str],
+    revealed: dict[tuple[int, int], str],
+    freq_dict: dict[str, float],
+) -> Counter:
+    """Sum Zipf frequencies of words containing each unknown letter.
+    Words with Zipf=0 (not in corpus) contribute nothing."""
+    known = set(revealed.values())
+    counter: Counter = Counter()
+    for w in words:
+        z = freq_dict.get(w, 0.0)
+        if z == 0.0:
+            continue
+        for ch in set(w):
+            if ch not in known:
+                counter[ch] += z
+    return counter
+
+
 def letter_completion_stats(
     words: list[str],
     revealed: dict[tuple[int, int], str],
@@ -313,7 +332,7 @@ def letter_completion_stats(
 # Display
 # ---------------------------------------------------------------------------
 
-MAX_WORD_DISPLAY = 200
+MAX_WORD_DISPLAY = 40
 
 
 def sorted_words(
@@ -350,12 +369,6 @@ def print_state(
     if sort_mode == "speed":
         annotated = [f"{w}({steps_map[w]})" for w in display[:MAX_WORD_DISPLAY]]
         label = "  (steps-to-complete shown in parens)"
-    elif sort_mode == "freq":
-        annotated = [
-            f"{w}({freq_dict.get(w, 0.0):.1f})" if freq_dict.get(w, 0.0) > 0 else w
-            for w in display[:MAX_WORD_DISPLAY]
-        ]
-        label = "  (Zipf freq shown in parens; 0 = not in corpus)"
     else:
         annotated = display[:MAX_WORD_DISPLAY]
         label = ""
@@ -373,6 +386,15 @@ def print_state(
         for letter, count in freq.most_common(5):
             pct = 100 * count / n
             print(f"    {letter.upper()}: in {count}/{n} words ({pct:.0f}%)")
+
+    # --- Zipf-weighted letter frequencies ---
+    zipf_w = letter_zipf_stats(words, revealed, freq_dict)
+    if zipf_w:
+        total_zipf = sum(freq_dict.get(w, 0.0) for w in words)
+        print("\n  Letter frequencies (Zipf-weighted, unknown positions):")
+        for letter, weight in zipf_w.most_common(5):
+            pct = 100 * weight / total_zipf if total_zipf > 0 else 0
+            print(f"    {letter.upper()}: {weight:.1f}  ({pct:.0f}% of remaining Zipf mass)")
 
     # --- Completion stats ---
     comp = letter_completion_stats(words, revealed, steps_map)
