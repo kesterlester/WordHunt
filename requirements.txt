@@ -1,0 +1,5 @@
+# Runtime dependencies (needed to run word_finder.py)
+# — none beyond the Python standard library —
+
+# Data-generation dependencies (needed to rebuild dict_raw.csv / dict_game.csv)
+wordfreq>=3.1.1   # Zipf-scale word frequencies; used by add_frequencies.py

@@ -33,7 +33,7 @@ for _c in range(5):
 POSITIONS.append(tuple((_i, _i) for _i in range(5)))          # TL -> BR diagonal
 POSITIONS.append(tuple((4 - _i, _i) for _i in range(5)))      # BL -> TR diagonal
 
-SORT_MODES = ["alpha", "speed"]
+SORT_MODES = ["freq", "alpha", "speed"]
 
 
 # ---------------------------------------------------------------------------
@@ -54,15 +54,26 @@ def matrix_to_user(matrix_r: int, matrix_c: int) -> tuple[int, int]:
 # Word loading
 # ---------------------------------------------------------------------------
 
-def load_words(path: str = DICT_PATH) -> list[str]:
+def load_words(path: str = DICT_PATH) -> "tuple[list[str], dict[str, float]]":
+    """Return (words, freq_dict) where freq_dict maps word -> Zipf frequency (0 if absent)."""
     words = []
+    freq: dict[str, float] = {}
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        next(reader)  # skip header
+        header = next(reader)
+        has_freq = len(header) >= 2 and header[1].strip() != ""
         for row in reader:
             if row and row[0]:
-                words.append(row[0].strip().lower())
-    return words
+                w = row[0].strip().lower()
+                words.append(w)
+                if has_freq and len(row) >= 2:
+                    try:
+                        freq[w] = float(row[1])
+                    except ValueError:
+                        freq[w] = 0.0
+                else:
+                    freq[w] = 0.0
+    return words, freq
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +320,11 @@ def sorted_words(
     words: list[str],
     sort_mode: str,
     steps_map: dict[str, int],
+    freq_dict: dict[str, float],
 ) -> list[str]:
+    if sort_mode == "freq":
+        # Highest Zipf first (most common); ties broken alphabetically.
+        return sorted(words, key=lambda w: (-freq_dict.get(w, 0.0), w))
     if sort_mode == "speed":
         return sorted(words, key=lambda w: (steps_map[w], w))
     return sorted(words)  # alpha
@@ -320,6 +335,7 @@ def print_state(
     revealed: dict[tuple[int, int], str],
     excluded: set[str],
     sort_mode: str,
+    freq_dict: dict[str, float],
 ) -> None:
     n = len(words)
     print(f"\nWords remaining: {n}  [sort: {sort_mode}]")
@@ -329,12 +345,17 @@ def print_state(
         return
 
     steps_map = all_min_steps(words, revealed, excluded)
-    display = sorted_words(words, sort_mode, steps_map)
+    display = sorted_words(words, sort_mode, steps_map, freq_dict)
 
     if sort_mode == "speed":
-        # Annotate each word with its step count
         annotated = [f"{w}({steps_map[w]})" for w in display[:MAX_WORD_DISPLAY]]
         label = "  (steps-to-complete shown in parens)"
+    elif sort_mode == "freq":
+        annotated = [
+            f"{w}({freq_dict.get(w, 0.0):.1f})" if freq_dict.get(w, 0.0) > 0 else w
+            for w in display[:MAX_WORD_DISPLAY]
+        ]
+        label = "  (Zipf freq shown in parens; 0 = not in corpus)"
     else:
         annotated = display[:MAX_WORD_DISPLAY]
         label = ""
@@ -426,7 +447,7 @@ def main() -> None:
     print("  Commands:  grid | mode | undo | quit")
     print("=" * 54 + "\n")
 
-    words = load_words()
+    words, freq_dict = load_words()
     print(f"Loaded {len(words):,} candidate words.")
 
     revealed: dict[tuple[int, int], str] = {}
@@ -445,7 +466,7 @@ def main() -> None:
     all_words = filter_words(words, revealed, excluded)   # full list, post-exclusion
     words = all_words
     print_grid(revealed)
-    print_state(words, revealed, excluded, sort_mode)
+    print_state(words, revealed, excluded, sort_mode, freq_dict)
 
     # --- Main interaction loop ---
     while True:
@@ -475,7 +496,7 @@ def main() -> None:
             sort_mode = SORT_MODES[idx]
             print(f"  Sort mode -> {sort_mode}")
             print_grid(revealed)
-            print_state(words, revealed, excluded, sort_mode)
+            print_state(words, revealed, excluded, sort_mode, freq_dict)
             continue
 
         if inp == "undo":
@@ -486,7 +507,7 @@ def main() -> None:
                 words = filter_words(all_words, revealed, excluded)
                 print("  Undone.")
                 print_grid(revealed)
-                print_state(words, revealed, excluded, sort_mode)
+                print_state(words, revealed, excluded, sort_mode, freq_dict)
             continue
 
         parts = inp.split()
@@ -511,7 +532,7 @@ def main() -> None:
             print(f"  Removed {removed.upper()} from {cell_label(cell)}.")
             words = filter_words(all_words, revealed, excluded)
             print_grid(revealed)
-            print_state(words, revealed, excluded, sort_mode)
+            print_state(words, revealed, excluded, sort_mode, freq_dict)
             continue
 
         # --- Oracle letter report ---
@@ -547,7 +568,7 @@ def main() -> None:
         revealed[cell] = letter
         words = filter_words(all_words, revealed, excluded)
         print_grid(revealed)
-        print_state(words, revealed, excluded, sort_mode)
+        print_state(words, revealed, excluded, sort_mode, freq_dict)
 
 
 if __name__ == "__main__":
