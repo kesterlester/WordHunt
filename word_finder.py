@@ -302,7 +302,7 @@ def letter_completion_stats(
 # Display
 # ---------------------------------------------------------------------------
 
-MAX_WORD_DISPLAY = 40
+MAX_WORD_DISPLAY = 200
 
 
 def sorted_words(
