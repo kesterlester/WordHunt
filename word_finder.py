@@ -16,6 +16,7 @@ Coordinate convention (user-facing):
 
 import csv
 import os
+import random
 import sys
 from collections import Counter
 
@@ -101,6 +102,138 @@ def filter_words(
         w for w in words
         if any(word_fits_position(w, pos, revealed, excluded) for pos in POSITIONS)
     ]
+
+
+def find_fully_revealed(
+    words: list[str],
+    revealed: dict[tuple[int, int], str],
+    excluded: set[str],
+) -> "str | None":
+    """
+    Return a word if ALL 5 cells of some valid position are revealed and
+    spell that word.  By the game guarantee (only one valid word in the grid),
+    this is definitively the answer regardless of how many words remain in the
+    candidate list.
+    """
+    word_set = set(words)
+    for pos in POSITIONS:
+        if not all(cell in revealed for cell in pos):
+            continue
+        candidate = "".join(revealed[cell] for cell in pos)
+        if candidate in word_set and not any(ch in excluded for ch in candidate):
+            return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
+# F(L|G) — expected search-space size after asking the oracle about letter L
+# ---------------------------------------------------------------------------
+#
+# Model: the true game state is (WTRUE, PTRUE), drawn uniformly from valid
+# (word, position) pairs.  The oracle reports L's actual cell in the grid:
+#
+#   L ∈ WTRUE  →  u = PTRUE[ WTRUE.index(L) ]            (deterministic)
+#   L ∉ WTRUE  →  L sits in one of the 20 non-word cells.
+#                 Under a uniform prior over non-word arrangements, and given
+#                 the already-revealed cells, u ~ Uniform( U(G) \ cells(PTRUE) )
+#                 (any unrevealed cell not occupied by the word position).
+#
+# E[n(G') | ask L]
+#   = (1/n(G)) × Σ_{(w_r,p_r)} E_u[ n(G with L at u) | w_r, p_r ]
+#
+# Exact when n(G) ≤ F_EXACT_THRESHOLD; Monte Carlo otherwise.
+#
+# MC estimator (one draw):
+#   1. Sample reporter pair (w_r, p_r) uniformly from valid_pairs.
+#   2. Draw oracle cell u:
+#        L ∈ w_r  →  u = p_r[ w_r.index(L) ]
+#        L ∉ w_r  →  u ~ Uniform( U(G) \ cells(p_r) )
+#   3. Sample tester pair (w_t, p_t) uniformly from valid_pairs.
+#   4. Score = word_fits(w_t, p_t, G with L at u).
+#   Mean score × n(G)  ≈  E[n(G') | ask L].
+#
+# ---------------------------------------------------------------------------
+
+F_EXACT_THRESHOLD = 2000   # n(G) above which MC is used
+F_MC_SAMPLES      = 3000   # (reporter, tester) draws per letter in MC mode
+
+
+def compute_F(
+    words: list[str],
+    revealed: dict[tuple[int, int], str],
+    excluded: set[str],
+) -> "tuple[dict[str, float], bool]":
+    """
+    Return (F_dict, is_estimated).
+    F_dict maps each active letter to E[n(G') | ask that letter].
+    Smaller = more informative oracle query.
+    """
+    valid_pairs = [
+        (w, pos)
+        for w in words
+        for pos in POSITIONS
+        if word_fits_position(w, pos, revealed, excluded)
+    ]
+    n_G = len(valid_pairs)
+    if n_G == 0:
+        return {}, False
+
+    U_G = [(r, c) for r in range(5) for c in range(5) if (r, c) not in revealed]
+    if not U_G:
+        return {}, False
+
+    known_letters = set(revealed.values()) | excluded
+    active_letters = {ch for w in words for ch in w} - known_letters
+
+    estimated = n_G > F_EXACT_THRESHOLD
+    result: dict[str, float] = {}
+
+    if not estimated:
+        # Exact: precompute n(G with L at u) for every u once per letter,
+        # then sum over reporter pairs using the two-case oracle model.
+        for L in active_letters:
+            n_prime: dict = {}
+            for u in U_G:
+                new_rev = {**revealed, u: L}
+                n_prime[u] = sum(
+                    1 for w, pos in valid_pairs
+                    if word_fits_position(w, pos, new_rev, excluded)
+                )
+
+            total = 0.0
+            for w_r, p_r in valid_pairs:
+                p_r_set = set(p_r)
+                if L in w_r:
+                    total += n_prime[p_r[w_r.index(L)]]
+                else:
+                    candidates = [u for u in U_G if u not in p_r_set]
+                    if candidates:
+                        total += sum(n_prime[u] for u in candidates) / len(candidates)
+
+            result[L] = total / n_G
+
+    else:
+        # Monte Carlo: sample (reporter, tester) pairs with correct oracle model.
+        rng = random.Random(hash(tuple(sorted(revealed.items()))))
+        for L in active_letters:
+            hits = 0
+            effective = 0
+            for _ in range(F_MC_SAMPLES):
+                w_r, p_r = rng.choice(valid_pairs)
+                if L in w_r:
+                    u = p_r[w_r.index(L)]
+                else:
+                    candidates = [c for c in U_G if c not in set(p_r)]
+                    if not candidates:
+                        continue
+                    u = rng.choice(candidates)
+                w_t, p_t = rng.choice(valid_pairs)
+                if word_fits_position(w_t, p_t, {**revealed, u: L}, excluded):
+                    hits += 1
+                effective += 1
+            result[L] = (hits / effective * n_G) if effective > 0 else n_G
+
+    return result, estimated
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +361,14 @@ def print_state(
             count = freq.get(letter, 0)
             print(f"    {letter.upper()}: avg {avg:.2f} steps  (in {count}/{n} words)")
 
+    # --- F(L|G) metric ---
+    F, estimated = compute_F(words, revealed, excluded)
+    if F:
+        tag = f"estimated, {F_MC_SAMPLES} samples" if estimated else "exact"
+        print(f"\n  E[search space after asking] [{tag}] — smallest = ask this next:")
+        for letter, exp_n in sorted(F.items(), key=lambda kv: kv[1])[:5]:
+            print(f"    {letter.upper()}: {exp_n:.1f} pairs remaining on avg")
+
 
 def print_grid(revealed: dict[tuple[int, int], str]) -> None:
     """Print grid with user-facing col/row labels (col left-right, row bottom-up)."""
@@ -313,6 +454,10 @@ def main() -> None:
             break
         if len(words) == 1:
             print(f"\n*** The word is: {words[0].upper()} ***")
+            break
+        solved = find_fully_revealed(words, revealed, excluded)
+        if solved:
+            print(f"\n*** {solved.upper()} is fully revealed in the grid — that's the word! ***")
             break
 
         print()
