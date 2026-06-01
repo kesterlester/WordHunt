@@ -312,6 +312,76 @@ def letter_zipf_stats(
     return counter
 
 
+def letter_entropy_stats(
+    words: list[str],
+    revealed: dict[tuple[int, int], str],
+    excluded: set[str],
+    freq_dict: dict[str, float],
+) -> "tuple[dict[str, float], dict[str, float]]":
+    """
+    For each unknown letter L compute its positional entropy over valid (word, pos) pairs.
+
+    Each pair contributes L to one of 6 buckets:
+      index -1 : L is not in the word
+      index 0-4: L is at word[i]
+
+    Returns (entropy_uniform, entropy_zipf) dicts mapping letter -> bits.
+    Uniform weight = 1 per pair; Zipf weight = zipf_frequency(word) per pair.
+    0 * log2(0) is treated as 0 (by convention / xlogx limit).
+    """
+    import math
+
+    valid_pairs = [
+        (w, pos)
+        for w in words
+        for pos in POSITIONS
+        if word_fits_position(w, pos, revealed, excluded)
+    ]
+    if not valid_pairs:
+        return {}, {}
+
+    known = set(revealed.values()) | excluded
+
+    # Accumulate in-word weights per (letter, word_index).
+    # Out-of-word weight = total - in-word total (computed afterwards).
+    from collections import defaultdict
+    u_in: dict = defaultdict(lambda: defaultdict(float))  # uniform
+    z_in: dict = defaultdict(lambda: defaultdict(float))  # zipf
+
+    u_total = float(len(valid_pairs))
+    z_total = 0.0
+
+    for w, _ in valid_pairs:
+        zf = freq_dict.get(w, 0.0)
+        z_total += zf
+        for i, ch in enumerate(w):
+            if ch not in known:
+                u_in[ch][i] += 1.0
+                z_in[ch][i] += zf
+
+    def _entropy(in_counts: dict, total: float) -> float:
+        if total == 0.0:
+            return 0.0
+        h = 0.0
+        s_in = 0.0
+        for v in in_counts.values():
+            if v > 0.0:
+                p = v / total
+                h -= p * math.log2(p)
+                s_in += v
+        # out-of-word bucket
+        v_out = total - s_in
+        if v_out > 0.0:
+            p = v_out / total
+            h -= p * math.log2(p)
+        return h
+
+    active = {ch for w, _ in valid_pairs for ch in w if ch not in known}
+    entropy_u = {L: _entropy(u_in[L], u_total) for L in active}
+    entropy_z = {L: _entropy(z_in[L], z_total) for L in active} if z_total > 0 else {}
+    return entropy_u, entropy_z
+
+
 def letter_completion_stats(
     words: list[str],
     revealed: dict[tuple[int, int], str],
@@ -395,6 +465,16 @@ def print_state(
         for letter, weight in zipf_w.most_common(5):
             pct = 100 * weight / total_zipf if total_zipf > 0 else 0
             print(f"    {letter.upper()}: {weight:.1f}  ({pct:.0f}% of remaining Zipf mass)")
+
+    # --- Positional entropy ---
+    ent_u, ent_z = letter_entropy_stats(words, revealed, excluded, freq_dict)
+    if ent_u:
+        top_u = sorted(ent_u.items(), key=lambda kv: -kv[1])[:5]
+        top_z = sorted(ent_z.items(), key=lambda kv: -kv[1])[:5] if ent_z else []
+        print("\n  Letter positional entropy over (word,pos) pairs [max=log2(6)≈2.58 bits]:")
+        print("    Uniform:       " + "  ".join(f"{L.upper()}:{h:.2f}" for L, h in top_u))
+        if top_z:
+            print("    Zipf-weighted: " + "  ".join(f"{L.upper()}:{h:.2f}" for L, h in top_z))
 
     # --- Completion stats ---
     comp = letter_completion_stats(words, revealed, steps_map)
