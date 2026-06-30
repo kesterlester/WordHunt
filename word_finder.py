@@ -15,6 +15,7 @@ Coordinate convention (user-facing):
 """
 
 import csv
+import math
 import os
 import random
 import sys
@@ -34,6 +35,65 @@ POSITIONS.append(tuple((_i, _i) for _i in range(5)))          # TL -> BR diagona
 POSITIONS.append(tuple((4 - _i, _i) for _i in range(5)))      # BL -> TR diagonal
 
 SORT_MODES = ["freq", "alpha", "speed"]
+
+
+# ---------------------------------------------------------------------------
+# Frequency weighting
+# ---------------------------------------------------------------------------
+# wordfreq stores each word's frequency on the *Zipf scale*: a logarithmic scale
+# on which a word with Zipf value z occurs ~10**z times per billion words.  So a
+# word's actual frequency is proportional to 10**z, NOT to z itself — a gap of
+# one Zipf unit is a 10x difference in real-world frequency.
+#
+# FREQ_ALPHA controls how a stored Zipf value z is turned into a weight,
+# interpolating *geometrically* (i.e. in log space, because the dynamic range is
+# huge) between two extremes:
+#
+#     alpha = 0.0  ->  weight proportional to z          (log-frequency weighting)
+#     alpha = 1.0  ->  weight proportional to 10**z      (true-frequency weighting)
+#
+# i.e.   weight(z)  proportional to   z**(1 - alpha) * (10**z)**alpha,
+# equivalently   log10(weight) = (1 - alpha) * log10(z) + alpha * z.
+#
+# alpha = 1.0 (the default) is the intended "weight by actual frequency".  Lower
+# values temper how aggressively the most common words dominate; the geometric
+# (log-space) blend keeps the interpolation sane across the large dynamic range.
+DEFAULT_FREQ_ALPHA = 1.0
+
+# Words absent from the wordfreq corpus carry Zipf 0.  Absence is not proof of
+# impossibility — the corpus may simply have been too small to contain the word —
+# so absent words get a small fixed floor rather than zero likelihood.  ABSENT_ZIPF
+# must be > 0 (its log10 is taken) and below the smallest observed Zipf (~1.0 in
+# dict_game.csv) so absent words rank below every word actually seen.  At alpha=1
+# this floor gives weight 10**ABSENT_ZIPF ~= 1, just under the rarest real word.
+ABSENT_ZIPF = 1e-3
+
+
+def _log10_weight(z: float, alpha: float) -> float:
+    """log10 of the (unnormalised) frequency weight for a word with Zipf value z."""
+    if z <= 0.0:
+        z = ABSENT_ZIPF
+    # Geometric interpolation between log-frequency (weight=z) and
+    # true-frequency (weight=10**z) endpoints; see DEFAULT_FREQ_ALPHA notes.
+    return (1.0 - alpha) * math.log10(z) + alpha * z
+
+
+def frequency_weights(zvals: "list[float]", alpha: float) -> "list[float]":
+    """Frequency weights for a list of Zipf values, one weight per input value.
+
+    Weights are returned rescaled so the largest is 1.0: the maximum log-weight is
+    subtracted before exponentiating (LogSumExp-style).  This avoids overflow and
+    the precision loss that would otherwise come from exponentiating values that
+    span many orders of magnitude and then summing them smallest-lost-against-
+    largest.  The shared scale factor cancels in every downstream ratio
+    (percentages, entropy probabilities), so the rescaling changes no reported
+    quantity.
+    """
+    if not zvals:
+        return []
+    logw = [_log10_weight(z, alpha) for z in zvals]
+    m = max(logw)
+    return [10.0 ** (lw - m) for lw in logw]
 
 
 # ---------------------------------------------------------------------------
@@ -297,19 +357,23 @@ def letter_zipf_stats(
     words: list[str],
     revealed: dict[tuple[int, int], str],
     freq_dict: dict[str, float],
-) -> Counter:
-    """Sum Zipf frequencies of words containing each unknown letter.
-    Words with Zipf=0 (not in corpus) contribute nothing."""
+    alpha: float = DEFAULT_FREQ_ALPHA,
+) -> "tuple[Counter, float]":
+    """Sum frequency weights of words containing each unknown letter.
+
+    Weights come from frequency_weights() (Zipf -> weight; see alpha there).
+    Returns (per-letter weight Counter, total weight over all words).  Words
+    absent from the corpus contribute a small floor weight rather than nothing."""
     known = set(revealed.values())
+    weights = frequency_weights([freq_dict.get(w, 0.0) for w in words], alpha)
     counter: Counter = Counter()
-    for w in words:
-        z = freq_dict.get(w, 0.0)
-        if z == 0.0:
-            continue
+    total = 0.0
+    for w, wt in zip(words, weights):
+        total += wt
         for ch in set(w):
             if ch not in known:
-                counter[ch] += z
-    return counter
+                counter[ch] += wt
+    return counter, total
 
 
 def letter_entropy_stats(
@@ -317,6 +381,7 @@ def letter_entropy_stats(
     revealed: dict[tuple[int, int], str],
     excluded: set[str],
     freq_dict: dict[str, float],
+    alpha: float = DEFAULT_FREQ_ALPHA,
 ) -> "tuple[dict[str, float], dict[str, float]]":
     """
     For each unknown letter L compute its positional entropy over valid (word, pos) pairs.
@@ -325,12 +390,11 @@ def letter_entropy_stats(
       index -1 : L is not in the word
       index 0-4: L is at word[i]
 
-    Returns (entropy_uniform, entropy_zipf) dicts mapping letter -> bits.
-    Uniform weight = 1 per pair; Zipf weight = zipf_frequency(word) per pair.
+    Returns (entropy_uniform, entropy_freq) dicts mapping letter -> bits.
+    Uniform weight = 1 per pair; frequency weight = frequency_weights(word) per
+    pair (Zipf -> weight via alpha; see frequency_weights).
     0 * log2(0) is treated as 0 (by convention / xlogx limit).
     """
-    import math
-
     valid_pairs = [
         (w, pos)
         for w in words
@@ -342,17 +406,24 @@ def letter_entropy_stats(
 
     known = set(revealed.values()) | excluded
 
+    # Frequency weight per word (shared across all of that word's pairs).  Compute
+    # once per distinct word so the LogSumExp rescaling in frequency_weights uses a
+    # single consistent reference maximum.
+    uniq_words = list(dict.fromkeys(w for w, _ in valid_pairs))
+    wmap = dict(zip(uniq_words,
+                    frequency_weights([freq_dict.get(w, 0.0) for w in uniq_words], alpha)))
+
     # Accumulate in-word weights per (letter, word_index).
     # Out-of-word weight = total - in-word total (computed afterwards).
     from collections import defaultdict
     u_in: dict = defaultdict(lambda: defaultdict(float))  # uniform
-    z_in: dict = defaultdict(lambda: defaultdict(float))  # zipf
+    z_in: dict = defaultdict(lambda: defaultdict(float))  # frequency-weighted
 
     u_total = float(len(valid_pairs))
     z_total = 0.0
 
     for w, _ in valid_pairs:
-        zf = freq_dict.get(w, 0.0)
+        zf = wmap[w]
         z_total += zf
         for i, ch in enumerate(w):
             if ch not in known:
@@ -402,7 +473,7 @@ def letter_completion_stats(
 # Display
 # ---------------------------------------------------------------------------
 
-MAX_WORD_DISPLAY = 40
+MAX_WORD_DISPLAY = 80
 
 
 def sorted_words(
@@ -425,6 +496,7 @@ def print_state(
     excluded: set[str],
     sort_mode: str,
     freq_dict: dict[str, float],
+    freq_alpha: float = DEFAULT_FREQ_ALPHA,
 ) -> None:
     n = len(words)
     print(f"\nWords remaining: {n}  [sort: {sort_mode}]")
@@ -457,40 +529,41 @@ def print_state(
             pct = 100 * count / n
             print(f"    {letter.upper()}: in {count}/{n} words ({pct:.0f}%)")
 
-    # --- Zipf-weighted letter frequencies ---
-    zipf_w = letter_zipf_stats(words, revealed, freq_dict)
-    if zipf_w:
-        total_zipf = sum(freq_dict.get(w, 0.0) for w in words)
-        print("\n  Letter frequencies (Zipf-weighted, unknown positions):")
+    # --- Frequency-weighted letter frequencies ---
+    a_label = "true-freq" if freq_alpha >= 1.0 else ("log-freq" if freq_alpha <= 0.0 else "blend")
+    zipf_w, total_w = letter_zipf_stats(words, revealed, freq_dict, freq_alpha)
+    if zipf_w and total_w > 0:
+        print(f"\n  Letter frequencies (frequency-weighted, alpha={freq_alpha:g} [{a_label}], "
+              "unknown positions):")
         for letter, weight in zipf_w.most_common(5):
-            pct = 100 * weight / total_zipf if total_zipf > 0 else 0
-            print(f"    {letter.upper()}: {weight:.1f}  ({pct:.0f}% of remaining Zipf mass)")
+            pct = 100 * weight / total_w
+            print(f"    {letter.upper()}: {pct:.0f}% of remaining frequency mass")
 
     # --- Positional entropy ---
-    ent_u, ent_z = letter_entropy_stats(words, revealed, excluded, freq_dict)
+    ent_u, ent_z = letter_entropy_stats(words, revealed, excluded, freq_dict, freq_alpha)
     if ent_u:
         top_u = sorted(ent_u.items(), key=lambda kv: -kv[1])[:5]
         top_z = sorted(ent_z.items(), key=lambda kv: -kv[1])[:5] if ent_z else []
         print("\n  Letter positional entropy over (word,pos) pairs [max=log2(6)≈2.58 bits]:")
         print("    Uniform:       " + "  ".join(f"{L.upper()}:{h:.2f}" for L, h in top_u))
         if top_z:
-            print("    Zipf-weighted: " + "  ".join(f"{L.upper()}:{h:.2f}" for L, h in top_z))
+            print(f"    Freq-weighted: " + "  ".join(f"{L.upper()}:{h:.2f}" for L, h in top_z))
 
-    # --- Completion stats ---
-    comp = letter_completion_stats(words, revealed, steps_map)
-    if comp:
-        print("\n  Avg steps to completion if letter chosen next:")
-        for letter, avg in sorted(comp.items(), key=lambda kv: kv[1])[:5]:
-            count = freq.get(letter, 0)
-            print(f"    {letter.upper()}: avg {avg:.2f} steps  (in {count}/{n} words)")
+    ### # --- Completion stats ---
+    ### comp = letter_completion_stats(words, revealed, steps_map)
+    ### if comp:
+    ###     print("\n  Avg steps to completion if letter chosen next:")
+    ###     for letter, avg in sorted(comp.items(), key=lambda kv: kv[1])[:5]:
+    ###         count = freq.get(letter, 0)
+    ###         print(f"    {letter.upper()}: avg {avg:.2f} steps  (in {count}/{n} words)")
 
-    # --- F(L|G) metric ---
-    F, estimated = compute_F(words, revealed, excluded)
-    if F:
-        tag = f"estimated, {F_MC_SAMPLES} samples" if estimated else "exact"
-        print(f"\n  E[search space after asking] [{tag}] — smallest = ask this next:")
-        for letter, exp_n in sorted(F.items(), key=lambda kv: kv[1])[:5]:
-            print(f"    {letter.upper()}: {exp_n:.1f} pairs remaining on avg")
+    ### # --- F(L|G) metric ---
+    ### F, estimated = compute_F(words, revealed, excluded)
+    ### if F:
+    ###     tag = f"estimated, {F_MC_SAMPLES} samples" if estimated else "exact"
+    ###     print(f"\n  E[search space after asking] [{tag}] — smallest = ask this next:")
+    ###     for letter, exp_n in sorted(F.items(), key=lambda kv: kv[1])[:5]:
+    ###         print(f"    {letter.upper()}: {exp_n:.1f} pairs remaining on avg")
 
 
 def print_grid(revealed: dict[tuple[int, int], str]) -> None:
@@ -546,7 +619,7 @@ def main() -> None:
     print("  Coordinates: col 1-5 left→right, row 1-5 bottom→up")
     print("  Oracle input:  <letter> <col>,<row>   e.g.  l 3,4")
     print("  Delete cell:   . <col>,<row>  or  del <col>,<row>")
-    print("  Commands:  grid | mode | undo | quit")
+    print("  Commands:  grid | mode | alpha <0..1> | undo | quit")
     print("=" * 54 + "\n")
 
     words, freq_dict = load_words()
@@ -555,6 +628,7 @@ def main() -> None:
     revealed: dict[tuple[int, int], str] = {}
     excluded: set[str] = set()
     sort_mode = SORT_MODES[0]
+    freq_alpha = DEFAULT_FREQ_ALPHA   # 0=log-freq weighting, 1=true frequency
     history: list[dict[tuple[int, int], str]] = []   # undo stack
 
     # --- Excluded letter ---
@@ -568,7 +642,7 @@ def main() -> None:
     all_words = filter_words(words, revealed, excluded)   # full list, post-exclusion
     words = all_words
     print_grid(revealed)
-    print_state(words, revealed, excluded, sort_mode, freq_dict)
+    print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
 
     # --- Main interaction loop ---
     while True:
@@ -584,7 +658,7 @@ def main() -> None:
             break
 
         print()
-        inp = prompt("Oracle report (letter col,row) | . col,row | grid | mode | undo | quit : ")
+        inp = prompt("Oracle report (letter col,row) | . col,row | grid | mode | alpha | undo | quit : ")
 
         if inp in ("quit", "q", "exit"):
             break
@@ -598,7 +672,25 @@ def main() -> None:
             sort_mode = SORT_MODES[idx]
             print(f"  Sort mode -> {sort_mode}")
             print_grid(revealed)
-            print_state(words, revealed, excluded, sort_mode, freq_dict)
+            print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+            continue
+
+        if inp.split()[:1] == ["alpha"]:
+            parts2 = inp.split()
+            if len(parts2) == 1:
+                print(f"  Frequency-weight alpha = {freq_alpha:g}  "
+                      "(0 = log-freq weighting, 1 = true frequency)")
+                continue
+            try:
+                val = float(parts2[1])
+            except ValueError:
+                print("  Usage: alpha <value>  (0 = log-freq weighting, 1 = true frequency)")
+                continue
+            if not 0.0 <= val <= 1.0:
+                print("  Note: alpha is intended for [0, 1]; applying it anyway.")
+            freq_alpha = val
+            print(f"  Frequency-weight alpha -> {freq_alpha:g}")
+            print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
             continue
 
         if inp == "undo":
@@ -609,7 +701,7 @@ def main() -> None:
                 words = filter_words(all_words, revealed, excluded)
                 print("  Undone.")
                 print_grid(revealed)
-                print_state(words, revealed, excluded, sort_mode, freq_dict)
+                print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
             continue
 
         parts = inp.split()
@@ -634,7 +726,7 @@ def main() -> None:
             print(f"  Removed {removed.upper()} from {cell_label(cell)}.")
             words = filter_words(all_words, revealed, excluded)
             print_grid(revealed)
-            print_state(words, revealed, excluded, sort_mode, freq_dict)
+            print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
             continue
 
         # --- Oracle letter report ---
@@ -670,7 +762,7 @@ def main() -> None:
         revealed[cell] = letter
         words = filter_words(all_words, revealed, excluded)
         print_grid(revealed)
-        print_state(words, revealed, excluded, sort_mode, freq_dict)
+        print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
 
 
 if __name__ == "__main__":
