@@ -21,7 +21,7 @@ import random
 import sys
 from collections import Counter
 
-DICT_PATH = os.path.join(os.path.dirname(__file__), "dict_game.csv")
+DICT_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dict_game.csv")
 
 # ---------------------------------------------------------------------------
 # 12 word positions in 0-based (matrix_row, matrix_col) where row 0 = top.
