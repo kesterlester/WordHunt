@@ -117,18 +117,47 @@ class World:
     grid: "dict[Cell, str]"
 
 
-def enumerate_worlds(n: int, words: list[str], excluded_global: str | None = None) -> list[World]:
+def spelled_words(grid: "dict[Cell, str]", lines: list[Line], word_set: set) -> "list[tuple[str, Line]]":
+    """Every (word, line) pair such that `line` spells a member of
+    `word_set` when read off `grid` -- normally exactly one (the designated
+    answer); more than one means this grid is a "collision" (see
+    enumerate_worlds's `reject_collisions`)."""
+    hits = []
+    for line in lines:
+        s = "".join(grid[c] for c in line)
+        if s in word_set:
+            hits.append((s, line))
+    return hits
+
+
+def enumerate_worlds(
+    n: int,
+    words: list[str],
+    excluded_global: str | None = None,
+    reject_collisions: bool = False,
+) -> list[World]:
     """
     Brute-force enumerate every world M1 can produce.
 
     If `excluded_global` is given, only worlds with that excluded letter are
     generated (this is the realistic case: the player is told the excluded
     letter before play starts, so it need not be left as a live hypothesis).
+
+    If `reject_collisions` is True, applies the simplest veto policy from
+    the design discussion of 2026-09-17 ("restart from step 1"): any grid
+    where the dross letters happen to also spell a second dictionary word
+    along some other line is discarded outright, rather than kept with an
+    ambiguous designated answer.  Filtering the uniform base distribution
+    this way is mathematically identical to resampling steps 1-4 from
+    scratch until no collision occurs, so this is a legitimate (if the
+    simplest possible) instance of a real M2, not just a data-cleaning
+    step. See `collision_rate` for how often this actually triggers.
     """
     alphabet = alphabet_for(n)
     validate_words(words, n, alphabet)
     lines = lines_for(n)
     all_cells = [(r, c) for r in range(n) for c in range(n)]
+    word_set = set(words)
 
     worlds: list[World] = []
     for w in words:
@@ -143,8 +172,24 @@ def enumerate_worlds(n: int, words: list[str], excluded_global: str | None = Non
                 for perm in itertools.permutations(remaining_letters):
                     grid = dict(zip(line, w))
                     grid.update(zip(remaining_cells, perm))
+                    if reject_collisions and len(spelled_words(grid, lines, word_set)) > 1:
+                        continue
                     worlds.append(World(w, line, excluded, grid))
     return worlds
+
+
+def collision_rate(n: int, words: list[str], excluded_global: str) -> float:
+    """Fraction of raw-M1 worlds (no veto) whose grid spells more than one
+    dictionary word somewhere -- i.e. how often the "designated answer" is
+    actually ambiguous.  A direct, measured answer to "how significant a
+    departure from the real game is M1 without a veto step?"."""
+    lines = lines_for(n)
+    word_set = set(words)
+    worlds = enumerate_worlds(n, words, excluded_global=excluded_global)
+    if not worlds:
+        return 0.0
+    collisions = sum(1 for w in worlds if len(spelled_words(w.grid, lines, word_set)) > 1)
+    return collisions / len(worlds)
 
 
 def expected_world_count(n: int, num_words: int, excluded_global: str | None = None) -> int:
@@ -159,15 +204,29 @@ def expected_world_count(n: int, num_words: int, excluded_global: str | None = N
 # ---------------------------------------------------------------------------
 # Oracle
 # ---------------------------------------------------------------------------
+#
+# CORRECTED 2026-09-17 (was wrong in the first commit on this branch): the
+# grid is a full bijection over every non-excluded letter, so querying a
+# letter L always resolves to L's one true cell -- whether or not L turns
+# out to be part of the answer word.  It does NOT return "no location" for
+# dross letters.  This matches the real game (querying a letter that isn't
+# part of the answer still shows you where it sits) and matches
+# wordhunt.py's actual `word_fits_position`, which treats every entry in
+# `revealed` uniformly regardless of whether it's later found to be part of
+# the answer word -- there is no separate "absent, no location" case there
+# at all.  The previous version of this function silently modelled a much
+# less informative (and wrong) oracle.
+# ---------------------------------------------------------------------------
 
-def query_outcome(world: World, letter: str) -> "Cell | None":
-    """What the oracle reports for `letter` against this world's true grid."""
-    if letter in world.word:
-        return world.line[world.word.index(letter)]
-    return None
+def query_outcome(world: World, letter: str) -> Cell:
+    """The one cell where `letter` actually sits in this world's grid."""
+    for cell, ch in world.grid.items():
+        if ch == letter:
+            return cell
+    raise ValueError(f"{letter!r} not in this world's grid (is it the excluded letter?)")
 
 
-def consistent_with_history(world: World, history: "list[tuple[str, Cell | None]]") -> bool:
+def consistent_with_history(world: World, history: "list[tuple[str, Cell]]") -> bool:
     return all(query_outcome(world, letter) == outcome for letter, outcome in history)
 
 
@@ -211,8 +270,20 @@ class ExactSolver:
         if cached is not None:
             return cached
 
-        wl = {(self.worlds[i].word, self.worlds[i].line) for i in candidate_idx}
-        if len(wl) <= 1:
+        # Terminal iff the underlying GRID is uniquely determined -- NOT iff
+        # the tagged "designated" (word,line) is uniquely determined.  Those
+        # differ exactly when a grid happens to spell two dictionary words
+        # on two different lines (a "collision", possible under M1's lack
+        # of a veto step): two worlds can share an identical grid while
+        # tagged with different designated answers, and no oracle query can
+        # ever tell such worlds apart (the oracle is a function of the grid
+        # alone).  Terminating on tagged pairs in that case is not merely
+        # imprecise, it is a literal information-theoretic impossibility --
+        # found in practice as an infinite loop in the DP (2026-09-17,
+        # WORDS_N2 with excluded='e': "ab"@top-row and "cd"@bottom-row
+        # produce the identical grid).  See logbook.tex.
+        grids = {frozenset(self.worlds[i].grid.items()) for i in candidate_idx}
+        if len(grids) <= 1:
             result = (0.0, None)
             self._memo[candidate_idx] = result
             return result
@@ -296,8 +367,11 @@ def simulate_policy_exact_expectation(
         cached = memo.get(candidate_idx)
         if cached is not None:
             return cached
-        wl = {(worlds[i].word, worlds[i].line) for i in candidate_idx}
-        if len(wl) <= 1:
+        # See ExactSolver.solve: terminal iff the GRID is unique, not iff the
+        # tagged (word,line) is unique -- a grid collision makes the latter
+        # genuinely unknowable, not just hard.
+        grids = {frozenset(worlds[i].grid.items()) for i in candidate_idx}
+        if len(grids) <= 1:
             memo[candidate_idx] = 0.0
             return 0.0
         letter = choose_letter(candidate_idx)

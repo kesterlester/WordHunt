@@ -72,15 +72,19 @@ def test_every_world_is_internally_consistent():
         assert "".join(world.grid[c] for c in world.line) == world.word
 
 
-def test_query_outcome_matches_word_membership():
+def test_query_outcome_always_returns_the_letters_true_cell():
+    """Corrected oracle model (2026-09-17): every non-excluded letter
+    resolves to its one true cell, whether or not it's part of the answer
+    word -- the grid is a full bijection, so a dross letter is still
+    somewhere and the oracle still reports it (this matches wordhunt.py's
+    actual `revealed` bookkeeping, which never special-cases dross)."""
     n = 2
     for world in enumerate_worlds(n, WORDS_N2):
-        for letter in alphabet_for(n):
-            outcome = query_outcome(world, letter)
-            if letter in world.word:
-                assert outcome == world.line[world.word.index(letter)]
-            else:
-                assert outcome is None
+        for cell, letter in world.grid.items():
+            assert query_outcome(world, letter) == cell
+        # and, specifically, in-word letters land where the word says
+        for i, letter in enumerate(world.word):
+            assert query_outcome(world, letter) == world.line[i]
 
 
 def _initial_state(n, words, excluded_global):

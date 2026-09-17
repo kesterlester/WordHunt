@@ -361,4 +361,156 @@ one-step heuristics, however dressed up, are not a substitute for it (only
 a proxy of unknown and state-dependent quality, per Section~\ref{sec:n3}).
 That would be a complete and legitimate result, not a failure to reach one.
 
+\section{Corrections (2026-09-17, same day)}
+\label{sec:corrections}
+
+Per this logbook's stated practice, errors found in the results above are
+recorded here rather than silently rewritten. \textbf{Every numeric result
+in Sections~\ref{sec:results}--\ref{sec:n5wall} was computed under a wrong
+oracle model} and should be treated as superseded pending re-derivation.
+
+\subsection{Bug 1: the oracle model was wrong}
+
+The original \texttt{query\_outcome} returned \emph{no location at all}
+when a queried letter was not part of the answer word. This is not what
+the real game does, and not what \texttt{wordhunt.py} implements: the grid
+is a full bijection over every non-excluded letter, so querying any letter
+always resolves to its one true cell, whether or not that letter turns out
+to be part of the answer. A "not in the word" outcome never occurs as a
+distinct case in \texttt{wordhunt.py}'s bookkeeping -- every entry in
+\texttt{revealed} is handled identically by \texttt{word\_fits\_position}
+regardless of whether it later turns out to be dross. \texttt{query\_outcome}
+has been corrected to always return the letter's true cell.
+
+This is the same category of mistake as the earliest abandoned "F(L$\mid$G)"
+attempt from the original design discussion (modelling where a dross
+letter "would be"), recurring in a new piece of code -- worth remembering
+next time an oracle-behaviour assumption is written down without a test
+against brute-force enumeration first.
+
+\subsection{Bug 2: the stopping condition was ill-posed without a veto step}
+
+Fixing bug 1 immediately exposed an infinite loop in the DP. Diagnosis: at
+$n=2$, excluded=`e', two \emph{different} generative paths --
+$w=$``ab'' along the top row, and $w=$``cd'' along the bottom row -- can
+produce the \emph{identical} grid:
+\begin{lstlisting}
+World A: word='ab', line=top row     grid={(0,0):a,(0,1):b,(1,0):c,(1,1):d}
+World B: word='cd', line=bottom row  grid={(0,0):a,(0,1):b,(1,0):c,(1,1):d}
+SAME GRID? True
+\end{lstlisting}
+No sequence of oracle queries can ever tell these apart, because the
+oracle's answers are a pure function of the grid, and the grid is
+identical. The DP's termination check (`is the tagged (word,line) unique?')
+was asking an unanswerable question and looped forever trying to resolve
+it. This is exactly the concern raised when $M_1$'s lack of a veto step
+was agreed to: \emph{"if you choose to do that you must then be clear
+about the stopping condition."} It surfaced as a literal bug rather than
+staying a hypothetical.
+
+\textbf{Fix}: termination is now defined on \emph{grid} uniqueness, not
+tagged-pair uniqueness -- i.e.\ $M_1$'s well-defined notion of "solved" is
+"the grid is fully reconstructed," which coincides with "the designated
+answer is known" except exactly in a collision, where the latter is
+genuinely unknowable and the former is the most that can honestly be
+claimed.
+
+\textbf{Measured collision rate} (fraction of raw, unvetoed $M_1$ worlds
+whose grid happens to spell more than one dictionary word somewhere):
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+$n$ & vocabulary size & collision rate \\
+\midrule
+2 & 5 words & 69\% (all excluded-letter scenarios) \\
+3 & 5--7 words & 4.3\%--8.2\%, depending on excluded letter \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The $n=2$ figure is inflated by an unrealistically small, densely
+overlapping toy vocabulary (a 5-word cycle on a 5-letter alphabet), but the
+$n=3$ figures are a genuine, measured answer to "how significant a
+departure is it to skip the veto step?": even a tiny 5--7-word vocabulary
+already produces an ambiguous grid 1 time in 12--25. This is direct
+evidence (not argument) that $M_2$ (with the veto step) is not an optional
+refinement -- it is needed for $M_1$ to be a reasonable model of the real
+game at all, exactly as anticipated in the original design discussion.
+
+\subsection{Consequence: exact solving got much harder, not easier}
+
+The corrected oracle is more informative per query (up to $n^2$ distinct
+outcomes -- which cell -- versus the old model's effectively $\le n+1$),
+which sounds like it should make the game easier to solve. It does not
+make the \emph{search} easier: richer outcomes mean a larger branching
+factor at every DP node, and the number of distinct reachable candidate
+sets explodes correspondingly. Concretely, at $n=3$, excluded=`a' (5
+candidate words, only 28{,}800 worlds -- trivial under the old, wrong
+oracle, solved in $<1$s with $\sim$100 memoised states): under the
+corrected oracle, \texttt{ExactSolver} passed 700{,}000 memoised states
+without terminating within 20 seconds. $n=2$ remains fully tractable
+(re-solved below).
+
+\subsection{Consequence: the (word, line) sufficiency lemma is retracted}
+
+Section~\ref{sec:lemma}'s lemma held under the old oracle because a dross
+letter's outcome (``absent'') genuinely didn't depend on anything beyond
+(word, line). Under the corrected oracle, a dross letter's revealed cell
+depends on the specific permutation of the remaining letters, which is
+\emph{not} determined by (word, line) alone, and whose distribution over
+remaining cells stops being uniform across surviving pairs once some cells
+have already been revealed (precisely the complication that broke the very
+first F(L$\mid$G) attempt). \texttt{PairSolver} still silently implements
+the old model and is simply wrong now; its equivalence tests are kept in
+\texttt{tests/test\_pair\_solver.py} but marked \texttt{xfail}/\texttt{skip}
+with an explanation, as the documented record of the retraction rather than
+being deleted. A correct pair-based (i.e.\ not full-world) solver requires
+properly counting consistent completions per pair given the revealed
+history so far -- not yet attempted.
+
+\subsection{Re-solved: $n=2$, corrected oracle and termination}
+
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+excluded & worlds & optimal $\mathbb{E}[\text{queries}]$ & greedy $\mathbb{E}[\text{queries}]$ \\
+\midrule
+a & 36 & 2.944 & 2.944 \\
+b & 36 & 2.944 & 2.944 \\
+c & 36 & 2.944 & 2.944 \\
+d & 36 & 2.944 & 2.944 \\
+e & 36 & 2.944 & 2.944 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Greedy still matches optimal at $n=2$ (as before the fix -- still
+plausibly just an artefact of this toy instance's size/symmetry;
+Section~\ref{sec:n3}'s $n=3$ counterexample was not re-verified under the
+corrected oracle because \texttt{ExactSolver} does not currently finish at
+$n=3$ post-fix -- see above). Note the value itself changed from the
+(wrong) 2.278 to 2.944: full-grid termination is a strictly harder target
+than tagged-pair termination, so this increase is expected, not a sign of
+a new bug, \emph{conditional on "know the whole grid" being the right
+definition of winning} -- which is exactly the open question below.
+
+\subsection{Open question, not yet resolved: what does "winning" require?}
+
+Grid-uniqueness termination is \emph{sound} (it can't loop forever, and it
+never claims certainty it doesn't have), but it may be stricter than
+necessary. The real game's actual win condition is presumably "the player
+can read off some line that is certainly a complete, valid word" -- not
+"every dross cell is known." Those two conditions coincide throughout
+almost the entire game, and differ only in collision states, where "the
+designated word" is unknowable but "some certainly-correct line" might
+still not require full grid knowledge either way. A closer-to-real
+definition would be: stop as soon as some $(w,p)$ is spelled by
+\emph{every} remaining consistent grid (not necessarily the one tagged as
+"designated," and not necessarily requiring every other cell to be
+pinned down too). This was noticed, not yet implemented, and the 2.944
+figure above should be read as an upper bound on expected queries under
+the real win condition, not necessarily the answer to the question we
+actually care about.
+
 \end{document}
