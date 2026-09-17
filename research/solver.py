@@ -1,0 +1,397 @@
+"""
+Exact solver + validator for the WordHunt oracle-query game, under an
+explicit, fully-specified toy generative model, at board sizes small enough
+that brute-force enumeration of every possible world is feasible.
+
+This module is deliberately independent of wordhunt.py / wordhunt2.py (the
+recreational tools) -- nothing here is imported by, or imports, either of
+them. See research/logbook.tex for the write-up this code supports.
+
+----------------------------------------------------------------------------
+Board size n (n=5 is the real game; this module is exercised at n=2, 3, ...):
+
+  - alphabet size  = n*n + 1   (n*n letters fill the grid, exactly one letter
+                                 of the alphabet is entirely absent -- as in
+                                 the real 5x5 game's 26-letter alphabet)
+  - grid           = n x n
+  - "lines"        = n rows + n columns + 2 diagonals = 2n + 2 candidate
+                      word positions, each of length n
+  - WORDS          = a small curated vocabulary of length-n strings, each
+                      with n distinct characters drawn from the alphabet.
+                      Need not be English -- just a fixed toy dictionary.
+
+----------------------------------------------------------------------------
+Model M1 ("no veto"):
+
+  1. word      ~ Uniform(WORDS)
+  2. line      ~ Uniform(LINES)
+  3. excluded  ~ Uniform(ALPHABET \\ set(word))
+  4. the remaining (n*n - n) letters are placed uniformly at random (a
+     uniform random permutation) into the remaining (n*n - n) cells.
+  5. (no rejection step -- M1 does not model the "dross letters
+     accidentally spell a second valid word" veto raised in the design
+     discussion of 2026-09-17; that is deferred to a future M2.)
+
+`excluded` is revealed to the player before play starts (exactly as the
+real game announces "which letter is missing"), so it is fixed per game
+instance rather than treated as a live hypothesis.
+
+Objective L1: minimise E[number of queries until (word, line) is uniquely
+determined].
+
+----------------------------------------------------------------------------
+Player interaction model:
+
+The player repeatedly picks an untested letter L (L != excluded). The
+oracle deterministically reports:
+  - the cell c = line[word.index(L)],   if L is part of the answer word
+  - None (no location disclosed),        if L is not part of the answer word
+
+This matches wordhunt.py's `revealed` / `excluded` bookkeeping: a "not in
+the word" answer never discloses where that dross letter actually sits.
+"""
+
+from __future__ import annotations
+
+import itertools
+import math
+import string
+from dataclasses import dataclass
+
+Cell = tuple[int, int]
+Line = tuple[Cell, ...]
+
+
+# ---------------------------------------------------------------------------
+# Board geometry
+# ---------------------------------------------------------------------------
+
+def lines_for(n: int) -> list[Line]:
+    """All 2n+2 candidate word positions for an n x n grid."""
+    lines: list[Line] = []
+    for r in range(n):
+        lines.append(tuple((r, c) for c in range(n)))          # rows
+    for c in range(n):
+        lines.append(tuple((r, c) for r in range(n)))          # columns
+    lines.append(tuple((i, i) for i in range(n)))               # TL->BR diag
+    lines.append(tuple((n - 1 - i, i) for i in range(n)))       # BL->TR diag
+    return lines
+
+
+def alphabet_for(n: int) -> list[str]:
+    """The n*n+1 letter toy alphabet, as the first that many lowercase letters."""
+    size = n * n + 1
+    if size > 26:
+        raise ValueError(f"n={n} needs a {size}-letter alphabet; only 26 available")
+    return list(string.ascii_lowercase[:size])
+
+
+def validate_words(words: list[str], n: int, alphabet: list[str]) -> None:
+    alpha_set = set(alphabet)
+    for w in words:
+        if len(w) != n:
+            raise ValueError(f"word {w!r} has length {len(w)}, expected {n}")
+        if len(set(w)) != n:
+            raise ValueError(f"word {w!r} repeats a letter")
+        if not set(w) <= alpha_set:
+            raise ValueError(f"word {w!r} uses letters outside {alphabet}")
+
+
+# ---------------------------------------------------------------------------
+# World enumeration (the brute-force ground truth)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class World:
+    """
+    One fully-realised grid, tagged with the (word, line, excluded) that
+    generated it.  Worlds are NOT deduplicated across generative paths: if
+    two different (word, line, excluded, permutation) choices happen to
+    produce the identical grid, both are kept as separate list entries, so
+    that a grid reachable via more generative paths is correctly given more
+    weight in the (implicitly uniform-per-entry) probability model.
+    """
+    word: str
+    line: Line
+    excluded: str
+    grid: "dict[Cell, str]"
+
+
+def enumerate_worlds(n: int, words: list[str], excluded_global: str | None = None) -> list[World]:
+    """
+    Brute-force enumerate every world M1 can produce.
+
+    If `excluded_global` is given, only worlds with that excluded letter are
+    generated (this is the realistic case: the player is told the excluded
+    letter before play starts, so it need not be left as a live hypothesis).
+    """
+    alphabet = alphabet_for(n)
+    validate_words(words, n, alphabet)
+    lines = lines_for(n)
+    all_cells = [(r, c) for r in range(n) for c in range(n)]
+
+    worlds: list[World] = []
+    for w in words:
+        remaining_after_word = [ch for ch in alphabet if ch not in w]
+        for line in lines:
+            remaining_cells = [c for c in all_cells if c not in line]
+            for excluded in remaining_after_word:
+                if excluded_global is not None and excluded != excluded_global:
+                    continue
+                remaining_letters = [ch for ch in remaining_after_word if ch != excluded]
+                assert len(remaining_cells) == len(remaining_letters)
+                for perm in itertools.permutations(remaining_letters):
+                    grid = dict(zip(line, w))
+                    grid.update(zip(remaining_cells, perm))
+                    worlds.append(World(w, line, excluded, grid))
+    return worlds
+
+
+def expected_world_count(n: int, num_words: int, excluded_global: str | None = None) -> int:
+    """Closed-form check on len(enumerate_worlds(...)) -- see test_solver.py."""
+    alpha_size = n * n + 1
+    num_lines = 2 * n + 2
+    num_excluded_choices = 1 if excluded_global is not None else (alpha_size - n)
+    remaining = alpha_size - n - 1
+    return num_words * num_lines * num_excluded_choices * math.factorial(remaining)
+
+
+# ---------------------------------------------------------------------------
+# Oracle
+# ---------------------------------------------------------------------------
+
+def query_outcome(world: World, letter: str) -> "Cell | None":
+    """What the oracle reports for `letter` against this world's true grid."""
+    if letter in world.word:
+        return world.line[world.word.index(letter)]
+    return None
+
+
+def consistent_with_history(world: World, history: "list[tuple[str, Cell | None]]") -> bool:
+    return all(query_outcome(world, letter) == outcome for letter, outcome in history)
+
+
+# ---------------------------------------------------------------------------
+# Exact DP solver (objective L1: minimise E[#queries to full determination])
+# ---------------------------------------------------------------------------
+
+class ExactSolver:
+    """
+    Memoized expectimax over the space of "candidate world index sets".
+
+    V(S) = 0                                                     if |{(w.word,w.line) : w in S}| <= 1
+    V(S) = 1 + min over letters L of  sum_{outcome} (|S_outcome|/|S|) * V(S_outcome)   otherwise
+
+    Because every world in `worlds` is an equally-weighted sample under M1
+    (see enumerate_worlds's docstring on non-deduplication), the fraction
+    |S_outcome|/|S| IS the true conditional probability of that outcome --
+    no separate weighting layer is needed, unlike the ad-hoc Zipf weighting
+    used in the wordhunt2.py "posterior" stat.  That is the whole point of
+    building this on top of exhaustive enumeration rather than reasoning
+    about (word, position) pairs directly.
+    """
+
+    def __init__(self, worlds: list[World], queryable_letters: list[str]):
+        self.worlds = worlds
+        self.queryable_letters = queryable_letters
+        self._memo: "dict[frozenset, tuple[float, str | None]]" = {}
+        self._outcome_cache: "dict[tuple[int, str], Cell | None]" = {}
+
+    def _outcome(self, idx: int, letter: str) -> "Cell | None":
+        key = (idx, letter)
+        cached = self._outcome_cache.get(key)
+        if cached is not None or key in self._outcome_cache:
+            return cached
+        val = query_outcome(self.worlds[idx], letter)
+        self._outcome_cache[key] = val
+        return val
+
+    def solve(self, candidate_idx: "frozenset[int]") -> "tuple[float, str | None]":
+        cached = self._memo.get(candidate_idx)
+        if cached is not None:
+            return cached
+
+        wl = {(self.worlds[i].word, self.worlds[i].line) for i in candidate_idx}
+        if len(wl) <= 1:
+            result = (0.0, None)
+            self._memo[candidate_idx] = result
+            return result
+
+        n_total = len(candidate_idx)
+        best_letter = None
+        best_val = math.inf
+
+        for letter in self.queryable_letters:
+            buckets: "dict[Cell | None, list[int]]" = {}
+            for i in candidate_idx:
+                buckets.setdefault(self._outcome(i, letter), []).append(i)
+            if len(buckets) <= 1:
+                continue  # no information from this letter among remaining candidates
+
+            expected = 0.0
+            for idxs in buckets.values():
+                sub = frozenset(idxs)
+                v_sub, _ = self.solve(sub)
+                expected += (len(idxs) / n_total) * v_sub
+            total = 1.0 + expected
+            if total < best_val - 1e-12:
+                best_val = total
+                best_letter = letter
+
+        result = (best_val, best_letter)
+        self._memo[candidate_idx] = result
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Greedy (one-step max information-gain) comparator
+# ---------------------------------------------------------------------------
+
+def outcome_entropy_bits(candidate_idx: "frozenset[int]", worlds: list[World], letter: str) -> float:
+    """Shannon entropy (bits) of the outcome partition -- the one-step
+    'value of information' metric from the wordhunt2.py design discussion,
+    now computed against real enumerated worlds instead of assumed pairs."""
+    n_total = len(candidate_idx)
+    if n_total == 0:
+        return 0.0
+    counts: "dict[Cell | None, int]" = {}
+    for i in candidate_idx:
+        key = query_outcome(worlds[i], letter)
+        counts[key] = counts.get(key, 0) + 1
+    h = 0.0
+    for c in counts.values():
+        p = c / n_total
+        h -= p * math.log2(p)
+    return h
+
+
+def greedy_choice(candidate_idx: "frozenset[int]", worlds: list[World],
+                   queryable_letters: list[str]) -> "str | None":
+    """The one-step max-entropy letter -- NOT guaranteed optimal for L1;
+    kept for comparison against ExactSolver's true optimum."""
+    best_letter = None
+    best_h = -1.0
+    for letter in queryable_letters:
+        h = outcome_entropy_bits(candidate_idx, worlds, letter)
+        if h > best_h + 1e-12:
+            best_h = h
+            best_letter = letter
+    return best_letter
+
+
+def simulate_policy_exact_expectation(
+    worlds: list[World],
+    initial_idx: "frozenset[int]",
+    choose_letter,
+) -> float:
+    """
+    Exact expected number of queries a policy takes, averaged over every
+    world in `initial_idx` as the (equally-likely) ground truth -- i.e. a
+    full brute-force check, not a Monte Carlo estimate.  `choose_letter(S)`
+    must return the next letter to query given current candidate set S.
+    """
+    memo: "dict[frozenset, float]" = {}
+
+    def cost(candidate_idx: "frozenset[int]") -> float:
+        cached = memo.get(candidate_idx)
+        if cached is not None:
+            return cached
+        wl = {(worlds[i].word, worlds[i].line) for i in candidate_idx}
+        if len(wl) <= 1:
+            memo[candidate_idx] = 0.0
+            return 0.0
+        letter = choose_letter(candidate_idx)
+        n_total = len(candidate_idx)
+        buckets: "dict[Cell | None, list[int]]" = {}
+        for i in candidate_idx:
+            buckets.setdefault(query_outcome(worlds[i], letter), []).append(i)
+        expected = 1.0
+        for idxs in buckets.values():
+            expected += (len(idxs) / n_total) * cost(frozenset(idxs))
+        memo[candidate_idx] = expected
+        return expected
+
+    return cost(initial_idx)
+
+
+# ---------------------------------------------------------------------------
+# Pair-only solver: the (word, line) sufficiency lemma
+# ---------------------------------------------------------------------------
+#
+# Full world enumeration is intractable beyond n=3 (see logbook.tex): the
+# number of ways to permute the (n*n - n) dross letters into the remaining
+# cells is (n*n-n-1)! -- 2 at n=2, 720 at n=3, but already ~4.8e8 at n=4.
+#
+# LEMMA: under M1, with `excluded` fixed, this factor is IDENTICAL for
+# every (word, line) hypothesis (it only depends on n, not on which word or
+# line), so it is a constant that cancels out of every relative-probability
+# calculation. The exact DP can therefore be run directly on (word, line)
+# pairs -- weighting each surviving pair equally -- without ever
+# constructing a single full grid, and must give bit-for-bit identical
+# results to the full-world solver wherever both are computable.  That
+# equivalence is checked in tests/test_pair_solver.py at n=2 and n=3; only
+# once that check passes is the pair-only solver trusted for n=4+.
+# ---------------------------------------------------------------------------
+
+Pair = "tuple[str, Line]"
+
+
+def enumerate_pairs(n: int, words: list[str], excluded_global: str) -> list[Pair]:
+    """Every (word, line) hypothesis consistent with `excluded_global`,
+    each an equally-weighted equivalence class of full worlds (see LEMMA)."""
+    lines = lines_for(n)
+    return [(w, line) for w in words if excluded_global not in w for line in lines]
+
+
+def pair_query_outcome(pair: Pair, letter: str) -> "Cell | None":
+    word, line = pair
+    if letter in word:
+        return line[word.index(letter)]
+    return None
+
+
+class PairSolver:
+    """Same recursion as ExactSolver, operating on (word, line) pairs
+    directly instead of on fully-realised grids -- see the sufficiency
+    LEMMA above.  Interface mirrors ExactSolver so tests can compare them
+    directly."""
+
+    def __init__(self, pairs: list[Pair], queryable_letters: list[str]):
+        self.pairs = pairs
+        self.queryable_letters = queryable_letters
+        self._memo: "dict[frozenset, tuple[float, str | None]]" = {}
+
+    def solve(self, candidate_idx: "frozenset[int]") -> "tuple[float, str | None]":
+        cached = self._memo.get(candidate_idx)
+        if cached is not None:
+            return cached
+
+        if len(candidate_idx) <= 1:
+            result = (0.0, None)
+            self._memo[candidate_idx] = result
+            return result
+
+        n_total = len(candidate_idx)
+        best_letter = None
+        best_val = math.inf
+
+        for letter in self.queryable_letters:
+            buckets: "dict[Cell | None, list[int]]" = {}
+            for i in candidate_idx:
+                buckets.setdefault(pair_query_outcome(self.pairs[i], letter), []).append(i)
+            if len(buckets) <= 1:
+                continue
+
+            expected = 0.0
+            for idxs in buckets.values():
+                sub = frozenset(idxs)
+                v_sub, _ = self.solve(sub)
+                expected += (len(idxs) / n_total) * v_sub
+            total = 1.0 + expected
+            if total < best_val - 1e-12:
+                best_val = total
+                best_letter = letter
+
+        result = (best_val, best_letter)
+        self._memo[candidate_idx] = result
+        return result
