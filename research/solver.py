@@ -469,3 +469,192 @@ class PairSolver:
         result = (best_val, best_letter)
         self._memo[candidate_idx] = result
         return result
+
+
+# ---------------------------------------------------------------------------
+# MopUpSolver: the REAL scoring objective (2026-09-18 correction)
+# ---------------------------------------------------------------------------
+#
+# Both ExactSolver and PairSolver above minimise E[queries until the
+# hypothesis space collapses to certainty]. That is NOT what the real game
+# scores. Per the 2026-09-18 correction: reaching logical certainty does not
+# end the game. The oracle only declares victory once every cell of the
+# (unique, under M2) true line has been individually revealed by a direct
+# query -- so if you deduce the answer with 2 of its 5 letters still
+# unqueried, you must spend 2 more turns querying exactly those letters
+# (which will obviously hit) before the game ends and the turn count is
+# reported. A query that happens to land on a true-line cell does double
+# duty: it narrows the hypothesis space AND advances this mandatory
+# mop-up, whereas a query landing on dross only does the former -- so the
+# optimal policy for this objective can genuinely differ from the optimal
+# policy for "reach certainty fastest".
+#
+# This requires tracking the revealed-cell set explicitly as DP state
+# (candidate_idx alone is not sufficient: two different query histories can
+# leave the same surviving hypothesis set behind while having incidentally
+# revealed different amounts of whichever line turns out to be true). Cell
+# identity (not which letter) is all that's needed: if a cell is already
+# revealed, every surviving candidate is already forced to agree on its
+# letter (that is what "surviving" / "consistent" means), so no extra
+# bookkeeping of letters is needed alongside the cell set.
+#
+# Assumes M2 (collision-free) worlds as input -- built via
+# enumerate_worlds(..., reject_collisions=True) -- so that "some candidate's
+# own line is now fully revealed" is unambiguous (see logbook.tex,
+# 2026-09-18 entry, on why raw M1 made this ill-posed).
+# ---------------------------------------------------------------------------
+
+class MopUpSolver:
+    """
+    Exact DP for E[query count at which the true line is fully revealed],
+    under M2 (collision-free) worlds. State = (candidate_idx, revealed
+    cells). See module-level comment above for why both are needed.
+    """
+
+    def __init__(self, worlds: list[World], queryable_letters: list[str]):
+        self.worlds = worlds
+        self.queryable_letters = queryable_letters
+        self._memo: "dict[tuple[frozenset, frozenset], tuple[float, str | None]]" = {}
+
+    def _is_done(self, world_idx: int, revealed_cells: "frozenset[Cell]") -> bool:
+        return all(c in revealed_cells for c in self.worlds[world_idx].line)
+
+    def solve(
+        self,
+        candidate_idx: "frozenset[int]",
+        revealed_cells: "frozenset[Cell]" = frozenset(),
+    ) -> "tuple[float, str | None]":
+        key = (candidate_idx, revealed_cells)
+        cached = self._memo.get(key)
+        if cached is not None:
+            return cached
+
+        active = frozenset(i for i in candidate_idx if not self._is_done(i, revealed_cells))
+        n_total = len(candidate_idx)
+        if not active:
+            # Every remaining candidate's own line is already fully revealed
+            # -- whichever one is secretly true, the game has already ended.
+            result = (0.0, None)
+            self._memo[key] = result
+            return result
+
+        n_active = len(active)
+        best_letter = None
+        best_val = math.inf
+
+        # A letter whose cell is already revealed is a guaranteed no-op --
+        # every remaining candidate already agrees on its location (that is
+        # what "still consistent" means), so re-querying it changes nothing
+        # and recursing on it would call this exact (candidate_idx,
+        # revealed_cells) state again before it is memoized, i.e. infinite
+        # recursion, not just waste. Must be excluded, not merely
+        # discouraged: found the hard way (RecursionError) rather than
+        # reasoned out in advance.
+        any_active = next(iter(active))
+        already_revealed_letters = {self.worlds[any_active].grid[c] for c in revealed_cells}
+
+        for letter in self.queryable_letters:
+            if letter in already_revealed_letters:
+                continue
+            # Partition only the ACTIVE worlds -- worlds already done need
+            # (and get) no further queries; their cost is already fixed and
+            # accounted for by the (n_active/n_total) scaling below. Do NOT
+            # skip a letter merely because it fails to discriminate between
+            # active worlds (unlike ExactSolver/PairSolver): a letter that
+            # lands on every active world's line at the same relative cell
+            # can still advance mop-up for all of them without narrowing
+            # anything, and that is real progress this objective must value.
+            buckets: "dict[Cell, list[int]]" = {}
+            for i in active:
+                c = query_outcome(self.worlds[i], letter)
+                buckets.setdefault(c, []).append(i)
+
+            expected = 0.0
+            for cell, idxs in buckets.items():
+                new_revealed = revealed_cells | {cell}
+                v_sub, _ = self.solve(frozenset(idxs), new_revealed)
+                expected += (len(idxs) / n_active) * v_sub
+            total = 1.0 + expected
+            if total < best_val - 1e-12:
+                best_val = total
+                best_letter = letter
+
+        result = ((n_active / n_total) * best_val, best_letter)
+        self._memo[key] = result
+        return result
+
+
+def simulate_mopup_policy_exact_expectation(
+    worlds: list[World],
+    initial_idx: "frozenset[int]",
+    choose_letter,
+) -> float:
+    """
+    Independent brute-force check for MopUpSolver: exact expected query
+    count under `choose_letter(candidate_idx, revealed_cells) -> letter`,
+    averaged over every world in `initial_idx` as ground truth, stopping
+    each one only when ITS OWN line is fully revealed (not merely when the
+    hypothesis space collapses) -- mirrors the real scoring rule directly
+    rather than reusing MopUpSolver's own recursion, so it can catch bugs
+    a single implementation checking itself would miss.
+    """
+    memo: "dict[tuple[frozenset, frozenset], float]" = {}
+
+    def cost(candidate_idx: "frozenset[int]", revealed_cells: "frozenset[Cell]") -> float:
+        key = (candidate_idx, revealed_cells)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+        active = frozenset(
+            i for i in candidate_idx
+            if not all(c in revealed_cells for c in worlds[i].line)
+        )
+        n_total = len(candidate_idx)
+        if not active:
+            memo[key] = 0.0
+            return 0.0
+        n_active = len(active)
+        letter = choose_letter(candidate_idx, revealed_cells)
+        buckets: "dict[Cell, list[int]]" = {}
+        for i in active:
+            buckets.setdefault(query_outcome(worlds[i], letter), []).append(i)
+        expected = 1.0
+        for cell, idxs in buckets.items():
+            new_revealed = revealed_cells | {cell}
+            expected += (len(idxs) / n_active) * cost(frozenset(idxs), new_revealed)
+        val = (n_active / n_total) * expected
+        memo[key] = val
+        return val
+
+    return cost(initial_idx, frozenset())
+
+
+def simulate_mopup_bruteforce(
+    worlds: list[World],
+    initial_idx: "frozenset[int]",
+    choose_letter,
+) -> float:
+    """
+    A second, structurally-independent check for MopUpSolver, sharing no
+    recursive formula with it or with simulate_mopup_policy_exact_expectation:
+    literally play the policy out against each world in turn as if it were
+    the one true hidden world, counting real turns until that world's own
+    line is fully revealed, then average. This is the closest thing to
+    "just play the game and see" available without a live oracle.
+    """
+    total_steps = 0
+    for true_i in initial_idx:
+        true_world = worlds[true_i]
+        candidate_idx = initial_idx
+        revealed: "frozenset[Cell]" = frozenset()
+        steps = 0
+        while not all(c in revealed for c in true_world.line):
+            letter = choose_letter(candidate_idx, revealed)
+            cell = query_outcome(true_world, letter)
+            revealed = revealed | {cell}
+            steps += 1
+            candidate_idx = frozenset(
+                i for i in candidate_idx if query_outcome(worlds[i], letter) == cell
+            )
+        total_steps += steps
+    return total_steps / len(initial_idx)

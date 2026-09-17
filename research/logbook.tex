@@ -611,4 +611,194 @@ figure above should be read as an upper bound on expected queries under
 the real win condition, not necessarily the answer to the question we
 actually care about.
 
+\textbf{Resolved 2026-09-18 (see Section~\ref{sec:mopup}):} neither the
+grid-uniqueness termination above nor the closer-to-real guess was right.
+There are three distinct candidate stopping rules, and they are strictly
+ordered by how many queries they typically take: (a) logical certainty
+(the candidate set collapses to one designated pair) -- happens soonest,
+but the real game does \emph{not} stop here, it grants no early exit for
+merely knowing the answer; (b) the whole $n^2$-cell grid revealed (what
+grid-uniqueness termination actually demanded) -- happens latest, and is
+\emph{more} than the real game requires, since cells off the true line
+never need to be revealed at all; (c) exactly the true line's own $n$
+cells revealed, regardless of the other $n^2-n$ cells' state -- this is
+the real rule. (a) $\le$ (c) $\le$ (b) in expected query count, generally strictly, for
+the same underlying world population. (The 2.944 figure isn't directly
+comparable to Section~\ref{sec:mopup}'s numbers below, since it was
+computed under raw $M_1$ -- collisions and all -- rather than the
+collision-free $M_2$ used there; but the structural point that grid-wide
+termination (b) overshoots the real rule (c), rather than the real rule
+being more lenient than logical certainty (a), stands regardless of which
+world population is used.) See Section~\ref{sec:mopup} for the corrected
+objective, its exact solver, and real numbers under (c).
+
+\section{2026-09-18: the real scoring rule, and $M_2$ at $n=2$}
+\label{sec:mopup}
+
+Two points raised by review of the previous day's entry, both real and
+both implemented here, working entirely at $n=2$ as requested (this
+section is deliberately thorough at that one size rather than rushing to
+scale up, per the request that prompted it).
+
+\subsection{The real objective: mop-up cost, not certainty}
+
+The real game does not end when the hypothesis space collapses to
+certainty. It ends only when the oracle observes that every cell of the
+(unique, under $M_2$) true line has been individually revealed by a
+direct query -- so deducing the answer with 2 of its letters still
+untested still costs 2 more turns, spent confirming exactly those
+letters, before the game reports how many turns it took. Every previous
+objective in this logbook (Sections~\ref{sec:results}--\ref{sec:n5wall}
+and even the corrected Section~\ref{sec:corrections}) computed something
+else: expected queries to \emph{certainty}, not to \emph{game end}.
+
+This matters strategically, not just numerically: a query landing on a
+true-line cell does double duty (it narrows the hypothesis space \emph{and}
+advances the mandatory mop-up), while a query landing on dross only does
+the former. A policy optimising for fastest certainty need not be the
+policy optimising for fastest mop-up-inclusive game end.
+
+\textbf{Definition.} $T := $ the query count at which $\mathrm{line}(w^*)
+\subseteq \mathrm{Revealed}$, where $w^*$ is whichever candidate is
+secretly true. Objective: minimise $\mathbb{E}[T]$.
+
+\subsection{$M_2$: the veto, implemented and measured}
+
+$M_2$ is $M_1$ with the simplest veto policy already coded in
+\texttt{enumerate\_worlds(..., reject\_collisions=True)}: any grid whose
+dross letters happen to also spell a second dictionary word along some
+other line is discarded. Because $M_2$ never permits two valid words to
+coexist in the true grid, the earlier grid-uniqueness termination
+(Section~\ref{sec:corrections}) is no longer needed to avoid the
+identical-grid ambiguity: under $M_2$, at most one candidate can ever have
+its own line fully covered by the true history at a time, so "some
+candidate's own line is now fully revealed" is unambiguous again.
+
+\textbf{Some (word, line) choices are unreachable under $M_2$.} A sharp
+observation from review: since $M_2$ discards any grid where the dross
+happens to spell a second word, it's possible for a specific (word, line)
+combination to have \emph{zero} surviving completions -- no arrangement of
+the leftover letters avoids a collision -- and this can depend on which
+line, not just which word (a word banned from the bottom row might be
+fine on the top row, since the fixed cross-cutting cells differ). Measured
+directly for \texttt{WORDS\_N2} = \{ab, bc, cd, de, ea\} (all $5\times4=20$
+possible (word, line, excluded) triples per word, $90$ total across the
+vocabulary):
+
+\begin{center}
+\begin{tabular}{cc}
+\toprule
+quantity & value \\
+\midrule
+total (word, line, excluded) triples & 90 \\
+triples with zero surviving $M_2$ completions & 40 (44\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+44\% is almost certainly inflated by this vocabulary's pathological
+structure (a 5-word cycle on a 5-letter alphabet, chosen originally for
+having "a little overlapping structure," which turns out to mean
+\emph{a lot} at $n=2$) -- a less densely-overlapping toy vocabulary would
+presumably show a smaller rate, and the design discussion's own intuition
+was that this effect is "vanishingly unlikely" at the real game's $n=5$.
+But the qualitative phenomenon is confirmed, not just plausible: entire
+(word, line) combinations really can be structurally impossible once
+uniqueness is enforced, and it really can depend on which line the word
+would occupy, not merely which word it is. (Verified by
+\texttt{test\_some\_word\_line\_choices\_are\_unreachable\_under\_m2}, and
+\texttt{test\_m2\_veto\_actually\_removes\_collisions} confirms every
+surviving $M_2$ world genuinely spells exactly one dictionary word
+somewhere, not merely "at most one long the designated line".)
+
+\subsection{\texttt{MopUpSolver}: exact DP for the real objective}
+
+Implemented as \texttt{MopUpSolver} in \texttt{solver.py}. State is
+$(H, \mathrm{Revealed})$ -- candidate set \emph{and} the revealed-cell
+set explicitly, not $H$ alone: two different query histories can leave
+the same surviving-candidate set behind while having incidentally
+revealed different amounts of whichever line turns out to be true, and
+that difference changes $T$ directly. (Cell identity alone suffices,
+without separately tracking which letter sits where: if a cell is already
+revealed, every surviving candidate is already forced to agree on its
+letter, by definition of "still consistent".)
+
+\begin{align}
+V(H, \mathrm{Rev}) &= 0 && \text{if every candidate in } H \text{ has } \mathrm{line}(w)\subseteq\mathrm{Rev} \\
+V(H, \mathrm{Rev}) &= \tfrac{|A|}{|H|}\Big[1 + \min_L \sum_{c} \tfrac{|A_c|}{|A|}\, V(A_c,\, \mathrm{Rev}\cup\{c\})\Big] && \text{otherwise}
+\end{align}
+where $A\subseteq H$ is the subset not yet "done" (own line $\not\subseteq
+\mathrm{Rev}$) and $A_c$ partitions $A$ by the cell $L$ resolves to.
+Already-done candidates contribute $0$ to the expectation (their cost is
+already fixed by an earlier turn) via the $|A|/|H|$ scaling, and are
+dropped from further recursion. Unlike \texttt{ExactSolver}, a letter is
+never skipped merely for failing to discriminate between active
+candidates -- it can still be valuable by advancing mop-up for all of
+them at once, and this objective must credit that.
+
+One real bug caught while building this (not merely a design subtlety):
+allowing the solver to consider re-querying an already-revealed letter
+causes literal infinite recursion, not just wasted computation -- the
+recursive call lands on the exact same $(H,\mathrm{Rev})$ state before it
+is memoised. Already-revealed letters must be excluded from the letter
+search outright, not left for the $\arg\min$ to (fail to) avoid.
+
+\textbf{Triple validation.} \texttt{MopUpSolver}'s value at the root is
+checked against two independently-coded computations that share no
+formula with it or with each other: \texttt{simulate\_mopup\_policy\_}
+\texttt{exact\_expectation} (an independent recursive re-derivation) and
+\texttt{simulate\_mopup\_bruteforce} (literal step-by-step play against
+every one of the $\le$36 worlds as ground truth, with no expectation
+formula at all -- the closest thing available to "just play the game and
+see"). All three agree exactly, for every excluded-letter scenario.
+
+\subsection{Results at $n=2$, $M_2$, mop-up-aware objective}
+
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+excluded & $M_2$ worlds & identify-only $\mathbb{E}[T]$ & mop-up-aware $\mathbb{E}[T]$ \\
+\midrule
+a & 11 & 2.0909 & 2.2727 \\
+b & 11 & 2.0909 & 2.2727 \\
+c & 11 & 2.0909 & 2.2727 \\
+d & 11 & 2.0909 & 2.2727 \\
+e & 11 & 2.0909 & 2.2727 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The mop-up tax is exactly $0.1818$ queries in every scenario for this
+vocabulary (identical across scenarios only because of this particular
+word list's cyclic symmetry, not a general law). Note $M_2$'s hypothesis
+space is much smaller than $M_1$'s raw one -- 11 surviving worlds here
+versus 36 under raw $M_1$ -- a direct, visible consequence of the 44\%
+impossibility rate above.
+
+\textbf{Optimal first move unchanged here, but don't generalise from
+that.} The mop-up-aware optimal first letter matches the identify-only
+optimal first letter in every scenario tested (e.g.\ excluded=`a': both
+pick `c'). That is a data point, not a proof that the two objectives'
+optimal \emph{policies} coincide throughout the game -- $n=2$ has only 2
+letters per line and very little room for the double-duty effect
+described above to bite on move one specifically. Worth deliberately
+checking for divergence at $n=3$, where a query has more structure to
+exploit, rather than assuming $n=2$'s coincidence generalises.
+
+\subsection{Status / next steps for this thread}
+
+Not yet done, in the spirit of "think about $n=2$ a lot before scaling
+up": (i) check the whole optimal \emph{policy} (not just the first move)
+for divergence between identify-only and mop-up-aware objectives, e.g.\
+by comparing the full decision tree or looking for a state where they
+recommend different letters; (ii) repeat the impossible-triple measurement
+with a less pathologically cyclic $n=2$ vocabulary, to see how much of the
+44\% is this word list's idiosyncrasy versus structural to $n=2$ itself;
+(iii) only once (i)-(ii) are understood at $n=2$, attempt $n=3$ under
+$M_2$ with the mop-up-aware objective (untried so far -- \texttt{ExactSolver}
+already struggled at $n=3$ post-oracle-fix even for the simpler
+identify-only objective, per Section~\ref{sec:corrections}, so
+\texttt{MopUpSolver} may fare worse, not better, at $n=3$ -- richer state
+$(H,\mathrm{Rev})$ instead of just $H$).
+
 \end{document}
