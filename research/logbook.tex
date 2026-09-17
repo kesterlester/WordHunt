@@ -28,8 +28,10 @@
 recreational assistance tools for a daily puzzle: 25 letters (one letter of
 the alphabet entirely absent) fill a $5\times5$ grid; a single 5-letter
 dictionary word is spelled along one of 12 lines (5 rows, 5 columns, 2
-diagonals); the player learns, one query at a time, whether a chosen letter
-is part of the answer word and, if so, at which grid cell.
+diagonals); the player learns, one query at a time, where a chosen letter
+actually sits in the grid (the grid is a full bijection over every
+non-excluded letter, so this is disclosed regardless of whether that
+letter turns out to be part of the answer word).
 
 Every statistic those tools compute --- raw letter frequency, Zipf-weighted
 frequency, positional entropy, a proposed Bayesian ``leading candidate''
@@ -59,6 +61,23 @@ All code lives in \texttt{research/} on the \texttt{optimal-solver-research}
 git branch, kept separate from the recreational tools so nothing here can
 break them. All numeric results quoted below were produced by the code in
 this directory and are reproduced by \texttt{research/tests/}.
+
+\subsection*{Notice to the reader (added after Section~\ref{sec:corrections}
+was written)}
+
+Sections 2--9 below were written \emph{before} two real bugs were found
+later the same day: a wrong oracle model, and (downstream of fixing that)
+a retracted sufficiency lemma. The model/algorithm descriptions in
+Sections 2--4 have been corrected in place to describe the model actually
+intended (and now actually implemented) rather than left wrong for
+narrative purposes -- a documentation bug is not historical data worth
+preserving the way a numeric result is. The sufficiency lemma
+(Section~\ref{sec:lemma}) and every numeric-results section built on it
+(Sections~\ref{sec:results}--\ref{sec:n5wall}) are marked
+\textbf{SUPERSEDED} at the point where they appear, with a pointer to
+Section~\ref{sec:corrections}, rather than silently rewritten or deleted,
+per this logbook's stated practice. Read Section~\ref{sec:corrections}
+before trusting any number before it.
 
 \section{Model $M_1$: the generative process}
 
@@ -94,44 +113,62 @@ real game), so it is fixed per game instance rather than left as a live
 hypothesis.
 
 \subsection{Oracle}
+\label{sec:oracle-fix}
 
-Querying an untested letter $L \ne e$ deterministically returns:
-\begin{itemize}
-  \item the cell $p[\,w.\mathrm{index}(L)\,]$, if $L$ is part of the answer
-  word,
-  \item nothing (no location disclosed), if $L$ is not part of the answer
-  word.
-\end{itemize}
-This matches \texttt{wordhunt.py}'s bookkeeping: a ``not in the word''
-answer never discloses where that dross letter actually sits.
+Querying an untested letter $L \ne e$ deterministically returns \emph{the
+one cell where $L$ actually sits in the grid} -- whether or not $L$ turns
+out to be part of the answer word. If $L$ happens to be part of the answer
+word, that cell is necessarily $p[\,w.\mathrm{index}(L)\,]$; if not, it is
+whichever of the $n^2-n$ dross cells the generative process (step 4 above)
+happened to place $L$ at. There is no ``not in the word, no location''
+outcome: the grid is a full bijection over every non-excluded letter, so
+every query resolves to a real cell. This matches \texttt{wordhunt.py}'s
+actual bookkeeping -- every entry in its \texttt{revealed} dict is handled
+identically by \texttt{word\_fits\_position} regardless of whether that
+letter later turns out to be part of the answer.
+
+(An earlier draft of this section, and the first implementation of
+\texttt{query\_outcome} in \texttt{solver.py}, stated and coded the
+opposite -- that a dross letter's query returns no location at all. That
+was a real bug, found and fixed the same day; see
+Section~\ref{sec:corrections} for how it was caught and what it broke
+downstream.)
 
 \section{Objective $L_1$}
 
-Minimise $\mathbb{E}[\text{number of queries until } (w,p) \text{ is
-uniquely determined}]$.
+Minimise $\mathbb{E}[\text{number of queries until the grid is uniquely
+determined}]$ (equivalently, until $(w,p)$ is uniquely determined, in every
+state reachable without a collision --- see Section~\ref{sec:corrections}
+on why grid uniqueness, not $(w,p)$ uniqueness, is the well-posed target
+once $M_1$ has no veto step, and on the still-open question of whether this
+is stricter than the real game's actual win condition).
 
 \section{Exact DP}
 
-Let $H$ be the current set of \emph{candidate} $(w,p)$ pairs consistent
-with everything observed so far. Under $M_1$, every candidate world is
-equally likely (Section~\ref{sec:lemma} makes this precise), so:
+Let $H$ be the current set of \emph{candidate worlds} (full grids)
+consistent with everything observed so far. Under $M_1$, every candidate
+world is equally likely, so:
 \begin{align}
-V(H) &= 0 &&\text{if all remaining candidates share one } (w,p) \\
-V(H) &= 1 + \min_{L} \sum_{\text{outcome } o} \frac{|H_o|}{|H|}\, V(H_o)
+V(H) &= 0 &&\text{if every remaining candidate has the same grid} \\
+V(H) &= 1 + \min_{L} \sum_{\text{cell } c} \frac{|H_c|}{|H|}\, V(H_c)
 &&\text{otherwise}
 \end{align}
-where $H_o$ partitions $H$ by the outcome querying $L$ would deterministically
-produce for each candidate: one bucket for ``$L$ absent'', merged across
-every candidate not containing $L$, and one bucket per concrete grid cell
-$c$ for ``$L$ present at $c$''. This is exactly the outcome-partition
-derived (for a different, contested weighting) in the wordhunt2.py
-design discussion; grounding it in an explicit, validated generative model
-removes that earlier ambiguity.
+where $H_c \subseteq H$ is the subset of candidates in which $L$ actually
+sits at cell $c$ (Section~\ref{sec:oracle-fix} on why this partitions by
+concrete cell, with no separate merged ``$L$ absent'' bucket: the oracle
+always discloses $L$'s true cell). Termination is on grid equality, not on
+agreement of some tagged $(w,p)$ pair --- see
+Section~\ref{sec:corrections} on why the latter can be an unanswerable
+question when $M_1$ has no veto step.
 
 The $\arg\min_L$ at the root is the provably optimal next query --- not a
-proxy for it. This is implemented as \texttt{ExactSolver} (operating on
-fully-enumerated worlds) and \texttt{PairSolver} (operating directly on
-$(w,p)$ pairs) in \texttt{solver.py}.
+proxy for it. This is implemented as \texttt{ExactSolver}, operating on
+fully-enumerated worlds, in \texttt{solver.py}. (A second solver,
+\texttt{PairSolver}, was written to operate directly on $(w,p)$ pairs
+without full worlds, on the strength of a sufficiency argument in
+Section~\ref{sec:lemma} below -- that argument is \textbf{retracted}; see
+Section~\ref{sec:corrections}. \texttt{ExactSolver} on full worlds is the
+only currently-trusted solver.)
 
 Also implemented: \texttt{greedy\_choice}, the one-step
 maximum-information-gain heuristic (i.e. choosing $L$ to maximise the
@@ -142,6 +179,18 @@ central point of this exercise.
 
 \section{The (word, line) sufficiency lemma}
 \label{sec:lemma}
+
+\textbf{RETRACTED (see Section~\ref{sec:corrections}).} The lemma below is
+FALSE under the corrected oracle of Section~\ref{sec:oracle-fix}: a dross
+letter's true cell depends on the specific dross permutation, which is not
+determined by $(w,p)$ alone, so $(w,p)$ pairs are not in fact a sufficient
+statistic. It held only under the earlier, buggy oracle (where a dross
+query carried no location information at all, so there was nothing about
+the permutation left to depend on). \texttt{PairSolver}, and every result
+below and in Sections~\ref{sec:n4wall}--\ref{sec:n5wall} that relies on it,
+are therefore also unsound as stated. Kept below, unmodified, as the
+argument that was believed correct at the time and the historical
+verification that was run against it -- not as a currently-trusted claim.
 
 Full-world enumeration (build every literal grid $M_1$ can produce) is
 combinatorially impossible beyond very small $n$: the number of ways to
@@ -169,23 +218,35 @@ relative-probability calculation. The exact DP can therefore be run
 directly on $(w,p)$ pairs, weighting each equally, without ever
 constructing a full grid.
 
-\textbf{Verification.} Rather than trust the algebra alone,
-\texttt{tests/test\_pair\_solver.py} builds both \texttt{ExactSolver} (on
+\textbf{Verification (as it stood before the fix -- now invalid, see the
+retraction notice above).} Rather than trust the algebra alone,
+\texttt{tests/test\_pair\_solver.py} built both \texttt{ExactSolver} (on
 fully-enumerated worlds) and \texttt{PairSolver} (on pairs only) for every
-excluded-letter scenario at $n=2$ and $n=3$ --- the largest sizes where full
-enumeration is still tractable --- and asserts the two report
-bit-identical $V(H_0)$. Both tests pass (Section~\ref{sec:results}). Only
-after this check succeeded was \texttt{PairSolver} trusted for $n=4$ and
-$n=5$, where full enumeration is impossible (row $n=4$ in the table above
-is already 479 million permutations \emph{per} (word, line, excluded)
-choice).
+excluded-letter scenario at $n=2$ and $n=3$ and asserted the two reported
+bit-identical $V(H_0)$; under the buggy oracle then in use, both did pass.
+Once the oracle was corrected, the same tests were re-run and now fail
+(kept in the suite as \texttt{xfail}/\texttt{skip}, deliberately, per
+Section~\ref{sec:corrections}) -- the ``verification'' this paragraph
+describes verified the wrong model self-consistently, not the real one.
 
-This removes the dross-permutation factorial as an obstacle entirely. It
-does \emph{not} remove the DP's own combinatorial cost, which turns out to
-be the real wall (Section~\ref{sec:n5wall}).
+Had it remained valid, this would have removed the dross-permutation
+factorial as an obstacle entirely, independent of the DP's own
+combinatorial cost (the separate wall in Section~\ref{sec:n5wall}, also
+now superseded). That structural point --- factorial-avoidance and
+DP-cost are two distinct obstacles --- still stands even though the
+specific lemma that was going to deliver the first one does not.
 
 \section{Results at $n=2$}
 \label{sec:results}
+
+\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} Computed under
+the buggy oracle of Section~\ref{sec:oracle-fix}'s earlier draft. The
+corrected re-solve is in Section~\ref{sec:corrections}
+(\S\ref{sec:corrections}, ``Re-solved: $n=2$''); the values below
+(2.2778) are not the corrected ones (2.944) and should not be quoted.
+Kept for the historical comparison in Finding 1 below, which is itself
+superseded by Section~\ref{sec:corrections}'s discussion of why it
+changed.
 
 Toy vocabulary (alphabet \{a,b,c,d,e\}): $W = \{\mathrm{ab, bc, cd, de,
 ea}\}$ (deliberately cyclic/symmetric).
@@ -219,6 +280,15 @@ recomputes the same expectation from scratch
 
 \section{Results at $n=3$: greedy is provably suboptimal}
 \label{sec:n3}
+
+\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} Computed under
+the buggy oracle. Not yet re-verified under the corrected oracle: as
+reported in Section~\ref{sec:corrections}, \texttt{ExactSolver} on full
+$n=3$ worlds did not finish within 20 seconds post-fix (it passed 700,000
+memoised states), so it is currently \emph{unknown} whether the specific
+greedy-suboptimality finding below still holds numerically, though the
+qualitative point it illustrates (greedy $\ne$ optimal in general, per the
+Mastermind/Wordle literature) does not depend on these particular numbers.
 
 Toy vocabulary (alphabet \{a..j\}): $W = \{\mathrm{abc, cde, efg, ghi, ijb,
 bad, dec, fah}\}$.
@@ -261,6 +331,15 @@ their weighting assumptions, one-step greedy selection on top of them is
 demonstrably not the same thing as optimal play.
 
 \section{The $n=4$ wall (diagnosed, and defused)}
+\label{sec:n4wall}
+
+\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} This section's
+conclusion (``thanks to the sufficiency lemma, this does not matter'')
+relies entirely on the retracted lemma of Section~\ref{sec:lemma}. The
+dross-permutation factorial obstacle described below is real and correctly
+diagnosed; the claimed resolution (via \texttt{PairSolver}) is not
+currently valid. $n=4$ should be considered unaddressed again until a
+correct pair-based (or otherwise sub-factorial) solver exists.
 
 Full-world enumeration is impossible at $n=4$ (Section~\ref{sec:lemma}'s
 table: $12! \approx 4.8\times10^8$ dross permutations per (word, line,
@@ -274,6 +353,17 @@ first glance.
 
 \section{The real wall: $n=5$ with realistic vocabulary size}
 \label{sec:n5wall}
+
+\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} Every number
+below was computed with \texttt{PairSolver}, which is now known to
+silently implement the wrong (retracted) oracle model throughout this
+whole section, not just at the edges -- so these are not a measurement of
+$M_1$'s real difficulty, they are a measurement of a different, incorrect
+game's difficulty. The qualitative shape of the finding (branching factor
+in $n$ drives a combinatorial wall well short of realistic dictionary
+size) is plausible and worth re-measuring once a correct solver exists,
+but the specific numbers below (e.g. ``40 words timed out'') must not be
+quoted as a property of the real game or of $M_1$ until redone.
 
 Using \texttt{PairSolver} (validated, not full-world enumeration) directly
 on random samples of real English words from \texttt{dict\_game.csv}
@@ -351,6 +441,14 @@ Not yet attempted, in rough order of expected value:
   requires tracking two moments through the Bellman recursion instead of
   one; algebraically routine but not yet implemented.
 \end{enumerate}
+
+\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} The paragraph
+below asserted ``verified at toy scale ($n\le3$)'' -- that is no longer
+established: $n=3$ under the corrected oracle has not been observed to
+terminate. Only $n=2$ is currently verified. The shape of the argument
+(exact play is achievable at small scale, uncertain at $n=5$, greedy is
+not a substitute) may still be right, but should be read as a hypothesis
+to re-check, not a settled conclusion.
 
 It is entirely possible that the honest endpoint of this project is a
 short paper whose conclusion is: exact optimal play is achievable and
