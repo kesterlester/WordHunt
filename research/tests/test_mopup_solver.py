@@ -20,10 +20,12 @@ from solver import (  # noqa: E402
     TagIdentifySolver,
     alphabet_for,
     enumerate_worlds,
+    greedy_choice,
     lines_for,
     query_outcome,
     simulate_mopup_bruteforce,
     simulate_mopup_policy_exact_expectation,
+    simulate_tag_policy_exact_expectation,
 )
 from toy_words import (  # noqa: E402
     WORDS_N2,
@@ -275,3 +277,41 @@ def test_impossible_triple_rate_is_vocabulary_density_driven_not_n2_specific():
              denser_impossible / denser_total]
     assert min(rates) == sparse_impossible / sparse_total
     assert all(r < 1.0 for r in rates)
+
+
+def _mopup_greedy_policy(cidx, rev, worlds, queryable):
+    """greedy_choice, adapted for use as a MopUpSolver-style policy: must
+    exclude already-revealed letters (re-testing one is a guaranteed
+    no-op and, worse, causes infinite recursion in the simulators -- see
+    MopUpSolver's own docstring for why)."""
+    any_i = next(iter(cidx))
+    already = {worlds[any_i].grid[c] for c in rev}
+    remaining = [l for l in queryable if l not in already]
+    return greedy_choice(cidx, worlds, remaining)
+
+
+def test_greedy_matches_optimal_for_certainty_but_not_for_real_objective_at_n2():
+    """
+    2026-09-18, logbook.tex Volume 2 Section "Optimal values": on this
+    vocabulary, one-step maximum-entropy greedy selection happens to
+    match the true optimum for the certainty objective C, but is
+    measurably worse for the real objective T -- greedy does not see the
+    double-duty value of a query landing on the true line. This is the
+    result that replaces the old (retracted) "Finding 2", which compared
+    greedy against grid-uniqueness termination, an objective with no
+    natural meaning under M2.
+    """
+    for excluded in N2_EXCLUDED_SCENARIOS:
+        worlds, queryable, idx = _mopup_setup(excluded)
+
+        v_tag, _ = TagIdentifySolver(worlds, queryable).solve(idx)
+        v_tag_greedy = simulate_tag_policy_exact_expectation(
+            worlds, idx, lambda s: greedy_choice(s, worlds, queryable)
+        )
+        assert math.isclose(v_tag, v_tag_greedy, rel_tol=1e-9, abs_tol=1e-9), excluded
+
+        v_mopup, _ = MopUpSolver(worlds, queryable).solve(idx)
+        v_mopup_greedy = simulate_mopup_policy_exact_expectation(
+            worlds, idx, lambda s, r: _mopup_greedy_policy(s, r, worlds, queryable)
+        )
+        assert v_mopup_greedy > v_mopup + 0.1, (excluded, v_mopup, v_mopup_greedy)

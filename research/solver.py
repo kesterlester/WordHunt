@@ -385,6 +385,42 @@ class TagIdentifySolver:
         return result
 
 
+def simulate_tag_policy_exact_expectation(
+    worlds: list[World],
+    initial_idx: "frozenset[int]",
+    choose_letter,
+) -> float:
+    """
+    Like simulate_policy_exact_expectation, but terminates on (word,line)
+    TAG uniqueness (matching TagIdentifySolver), not grid uniqueness
+    (matching ExactSolver). Only valid for M2 (collision-free) world sets.
+    `choose_letter(S)` returns the next letter to query given candidate
+    set S.
+    """
+    memo: "dict[frozenset, float]" = {}
+
+    def cost(candidate_idx: "frozenset[int]") -> float:
+        cached = memo.get(candidate_idx)
+        if cached is not None:
+            return cached
+        tags = {(worlds[i].word, worlds[i].line) for i in candidate_idx}
+        if len(tags) <= 1:
+            memo[candidate_idx] = 0.0
+            return 0.0
+        letter = choose_letter(candidate_idx)
+        n_total = len(candidate_idx)
+        buckets: "dict[Cell, list[int]]" = {}
+        for i in candidate_idx:
+            buckets.setdefault(query_outcome(worlds[i], letter), []).append(i)
+        expected = 1.0
+        for idxs in buckets.values():
+            expected += (len(idxs) / n_total) * cost(frozenset(idxs))
+        memo[candidate_idx] = expected
+        return expected
+
+    return cost(initial_idx)
+
+
 # ---------------------------------------------------------------------------
 # Greedy (one-step max information-gain) comparator
 # ---------------------------------------------------------------------------
