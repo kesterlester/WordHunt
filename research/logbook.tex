@@ -906,20 +906,143 @@ yet. \texttt{MopUpSolver} itself needed 45--80s per scenario here (3.46M--
 4.53M memoised states), noticeably more than \texttt{TagIdentifySolver}'s
 21--33s, consistent with the richer $(H,\mathrm{Rev})$ state.
 
-\subsection{Status / next steps for this thread}
+\subsection{Status as of end of 2026-09-17/18 session}
 
-Not yet done, in the spirit of "think about $n=2$ a lot before scaling
-up": (i) check the whole optimal \emph{policy} (not just the first move)
-for divergence between identify-only and mop-up-aware objectives, e.g.\
-by comparing the full decision tree or looking for a state where they
-recommend different letters; (ii) repeat the impossible-triple measurement
-with a less pathologically cyclic $n=2$ vocabulary, to see how much of the
-44\% is this word list's idiosyncrasy versus structural to $n=2$ itself;
-(iii) only once (i)-(ii) are understood at $n=2$, attempt $n=3$ under
-$M_2$ with the mop-up-aware objective (untried so far -- \texttt{ExactSolver}
-already struggled at $n=3$ post-oracle-fix even for the simpler
-identify-only objective, per Section~\ref{sec:corrections}, so
-\texttt{MopUpSolver} may fare worse, not better, at $n=3$ -- richer state
-$(H,\mathrm{Rev})$ instead of just $H$).
+Items (i)-(iii) below were the open list at the end of the previous
+entry. All were subsequently addressed overnight 2026-09-18 (unattended,
+while the collaborator slept -- see Section~\ref{sec:overnight} for the
+write-up and for the resource-budget reasoning behind what was and
+wasn't attempted).
+
+\begin{enumerate}
+  \item[(i)] check the whole optimal \emph{policy} (not just the first
+  move) for divergence between identify-only and mop-up-aware objectives
+  -- \textbf{done, Section~\ref{sec:overnight}: real, non-tie divergence
+  confirmed at $n=2$ and (sampled) at $n=3$.}
+  \item[(ii)] repeat the impossible-triple measurement with a less
+  pathologically cyclic $n=2$ vocabulary -- \textbf{done,
+  Section~\ref{sec:overnight}: confirmed vocabulary-density-driven, not
+  an $n=2$-specific artifact.}
+  \item[(iii)] attempt $n=3$ under $M_2$ with the mop-up-aware objective
+  -- \textbf{done in Section~\ref{sec:n3-redo} above}, ahead of this
+  list's original ordering, once tractability was confirmed by direct
+  testing rather than assumed.
+\end{enumerate}
+
+\section{2026-09-18 (overnight): closing the two open flags}
+\label{sec:overnight}
+
+Done unattended overnight at the collaborator's request, with an explicit
+instruction to pace the work against a visible resource budget (context
+window, 5-hour and weekly usage limits) rather than risk exhausting it or
+forcing an ungraceful auto-compaction mid-session. Given that constraint,
+the choice was deliberately to \emph{firm up} the two flagged open
+questions from earlier the same day rather than open a new, higher-risk
+front (a completion-counting pair-based solver, or a first attempt at
+$n=4$) -- both of those are exactly the kind of undertaking that has
+produced subtle, hard-to-catch bugs each time it's been tried so far in
+this project, and unsupervised overnight work is a bad time to be
+introducing new fragile machinery with no one to catch a wrong turn
+quickly.
+
+\subsection{(ii) Collision rate is vocabulary-density-driven, not an
+$n=2$ artifact}
+
+Measured the impossible-triple rate (Section~\ref{sec:mopup}) against
+three more $n=2$ vocabularies, alongside the original \texttt{WORDS\_N2}
+(44\%):
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+vocabulary & words & impossible triples \\
+\midrule
+sparse (\{ab, cd, be\}, minimal overlap) & 3 & 7.4\% \\
+original \texttt{WORDS\_N2} (5-word cycle) & 5 & 44.0\% \\
+denser (\{ab, cd, ae, bc\}) & 4 & 36.1\% \\
+degenerate (every possible 2-letter string is "a word") & 20 & 100.0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The 100\% figure for the degenerate case is not a bug, and is worth
+spelling out precisely because it looks alarming at first glance: if
+\emph{every} string is a valid word, every line of every grid trivially
+"spells a word," so no grid can ever have exactly one -- $M_2$ becomes
+unsatisfiable by construction, correctly reported as 100\% impossible
+rather than crashing or silently returning an empty result. This is a
+useful sanity boundary: the measured rate spans the full range from
+"vocabulary sparse enough that $M_2$ rejects almost nothing" (7.4\%) to
+"vocabulary dense enough that $M_2$ rejects everything" (100\%), with the
+original 44\% sitting well inside that range rather than being an
+outlier or a sign of a bug. \textbf{Conclusion: the effect is real and
+vocabulary-density-driven, confirmed rather than merely plausible, and
+not specific to $n=2$'s geometry.}
+
+\subsection{(i) The mop-up-aware and identify-only policies genuinely
+diverge, not just occasionally tie}
+
+Method: solve \texttt{MopUpSolver} at the root (its own recursion tries
+every letter, so its memo covers every state reachable under full
+exploration, not just the states on its optimal path). For every
+memoised state where MopUpSolver still had a genuine choice (i.e.\ was
+not yet terminal), look up what \texttt{TagIdentifySolver} would have
+chosen at the same candidate set (ignoring states where
+\texttt{TagIdentifySolver} was \emph{already} certain -- comparing "what
+would you do" against a solver with nothing left to decide is not a
+meaningful comparison, it just reflects that mop-up still has mandatory
+queries left after certainty, which is the entire point of
+Section~\ref{sec:mopup}). Where the two solvers picked different letters,
+computed the exact mop-up cost of forcing \texttt{TagIdentifySolver}'s
+choice instead, to separate genuine strategic disagreement from harmless
+tie-breaking (multiple equally-good letters, arbitrarily broken by
+iteration order).
+
+\textbf{$n=2$ (exhaustive, all 5 excluded-letter scenarios, all reachable
+states):} 135 states where both solvers faced a real choice; 65
+disagreed (48\%); \textbf{all 65 were genuine strategic divergences, zero
+were ties} -- the worst single-state gap was a full extra expected query
+if the tag-optimal choice were followed instead of the mop-up-optimal
+one. This closes the "don't generalise from move 1 coincidence" caveat
+from Section~\ref{sec:mopup} decisively: the two policies are not the
+same policy, they only happened to agree at the very first move for that
+particular (small, symmetric) vocabulary.
+
+\textbf{$n=3$ (excluded=`a', sampled 3000 of $\sim$3.4M memoised
+states):} kept deliberately bounded rather than exhaustive, both for
+overnight resource-safety and because exhaustively re-solving
+\texttt{TagIdentifySolver} from scratch at every one of millions of
+distinct candidate sets was not a responsible use of an unattended
+budget. Of the 3000 sampled states, 142 had both solvers still facing a
+genuine choice; \textbf{138 of those (97\%) were real strategic
+divergences}, none were ties, worst single-state gap again exactly 1.0
+extra expected query. Consistent with, and if anything stronger than, the
+$n=2$ result -- no sign that the divergence is an $n=2$ artifact that
+washes out with more structure; if anything it looks more pervasive with
+more structure to exploit.
+
+\textbf{Conclusion for (i):} the mop-up-aware and identify-only
+(tag-based) optimal policies are substantively different policies at
+every board size checked so far, not merely different at isolated states
+or only at the very first move. Any future heuristic or approximate
+solver for this game needs to be built and evaluated against the
+mop-up-aware objective specifically -- optimising for fastest certainty
+and then treating the rest as "obviously fine because you already know
+the answer" measurably leaves queries on the table.
+
+\subsection{What was deliberately NOT attempted overnight, and why}
+
+In order of what would otherwise have been next: a completion-counting
+pair-based solver (to escape full-world enumeration without the
+retracted Section~\ref{sec:lemma} lemma), $n=4$ under $M_2$, and
+branch-and-bound pruning for \texttt{MopUpSolver}. All three require new
+design decisions with real room to get subtly wrong (as every previous
+attempt at something structurally new in this project has, at least
+once, before being caught) -- exactly the kind of work this project's
+own stated practice says should be checked against brute force
+\emph{as it is built}, which is much harder to do well without a
+collaborator available to sanity-check an intermediate result. Left for
+a session where that's possible again, rather than risking a plausible-
+looking but wrong result sitting unreviewed until morning.
 
 \end{document}

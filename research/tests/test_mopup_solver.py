@@ -21,10 +21,16 @@ from solver import (  # noqa: E402
     alphabet_for,
     enumerate_worlds,
     lines_for,
+    query_outcome,
     simulate_mopup_bruteforce,
     simulate_mopup_policy_exact_expectation,
 )
-from toy_words import WORDS_N2  # noqa: E402
+from toy_words import (  # noqa: E402
+    WORDS_N2,
+    WORDS_N2_ALL,
+    WORDS_N2_DENSER,
+    WORDS_N2_SPARSE,
+)
 
 N2_EXCLUDED_SCENARIOS = list(alphabet_for(2))
 
@@ -152,3 +158,120 @@ def test_grid_identify_has_no_guaranteed_ordering_against_mopup():
         if v_grid < v_mopup:
             below_count += 1
     assert below_count == len(N2_EXCLUDED_SCENARIOS)
+
+
+def _mopup_cost_of_forcing(mopup, cidx, revealed_cells, letter):
+    """Expected mop-up cost of forcing this specific letter as the next
+    query, then playing optimally afterwards -- used to tell a genuine
+    strategic difference from harmless tie-breaking between two letters
+    that are actually equally good."""
+    active = frozenset(i for i in cidx if not mopup._is_done(i, revealed_cells))
+    n_total = len(cidx)
+    n_active = len(active)
+    buckets = {}
+    for i in active:
+        c = query_outcome(mopup.worlds[i], letter)
+        buckets.setdefault(c, []).append(i)
+    expected = 0.0
+    for cell, idxs in buckets.items():
+        new_rev = revealed_cells | {cell}
+        v_sub, _ = mopup.solve(frozenset(idxs), new_rev)
+        expected += (len(idxs) / n_active) * v_sub
+    return (n_active / n_total) * (1.0 + expected)
+
+
+def test_mopup_and_tag_identify_policies_genuinely_diverge():
+    """
+    2026-09-18 overnight finding: the mop-up-aware and tag-identify-only
+    optimal POLICIES (not just their root values) are substantively
+    different, at every state where both solvers still face a real
+    choice -- not merely tied at a few states, and not merely different
+    at the very first move (which happens to coincide for this
+    vocabulary and was flagged in Section "mopup" of logbook.tex as not
+    something to generalise from).
+
+    Exhaustive over every state MopUpSolver's own recursion visits (its
+    memo covers the whole reachable tree, since it tries every letter to
+    find the min, not just the states on its optimal path) across all 5
+    excluded-letter scenarios at n=2. Measured: 135 states where both
+    solvers had a genuine choice, 65 disagreed, and -- checked here --
+    every single disagreement is a real strategic difference (forcing
+    the tag-optimal choice instead measurably costs more), none are
+    ties.
+    """
+    n = 2
+    alphabet = alphabet_for(n)
+    meaningful = 0
+    real_divergences = 0
+
+    for excluded in alphabet:
+        worlds, queryable, idx = _mopup_setup(excluded)
+        mopup = MopUpSolver(worlds, queryable)
+        mopup.solve(idx)
+        tag = TagIdentifySolver(worlds, queryable)
+
+        for (cidx, rev), (_, letter_mopup) in mopup._memo.items():
+            if letter_mopup is None:
+                continue
+            _, letter_tag = tag.solve(cidx)
+            if letter_tag is None:
+                continue
+            meaningful += 1
+            if letter_tag == letter_mopup:
+                continue
+            gap = _mopup_cost_of_forcing(mopup, cidx, rev, letter_tag) - mopup._memo[(cidx, rev)][0]
+            assert gap > 1e-9, (
+                excluded, cidx, rev, letter_tag, letter_mopup,
+                "disagreement should always be a genuine strategic difference, "
+                "not a tie, for this vocabulary"
+            )
+            real_divergences += 1
+
+    assert meaningful == 135
+    assert real_divergences == 65
+
+
+def _impossible_triple_rate(n, words):
+    alphabet = alphabet_for(n)
+    lines = lines_for(n)
+    total = 0
+    impossible = 0
+    for w in words:
+        for line in lines:
+            for excluded in [c for c in alphabet if c not in w]:
+                total += 1
+                worlds = enumerate_worlds(n, words, excluded_global=excluded, reject_collisions=True)
+                if not any(wd.word == w and wd.line == line for wd in worlds):
+                    impossible += 1
+    return impossible, total
+
+
+def test_impossible_triple_rate_is_vocabulary_density_driven_not_n2_specific():
+    """
+    2026-09-18 overnight finding: the 44% M2-impossible-triple rate
+    measured for WORDS_N2 (logbook.tex) is not a property of n=2's
+    geometry -- it ranges from 7.4% (sparse, minimal-overlap vocabulary)
+    to a degenerate 100% (a vocabulary where literally every string is
+    "a word", so M2 is unsatisfiable by construction: every line of every
+    grid trivially spells a word, so no grid can ever have exactly one).
+    The measured 44% sits inside that range, not as an outlier.
+    """
+    sparse_impossible, sparse_total = _impossible_triple_rate(2, WORDS_N2_SPARSE)
+    original_impossible, original_total = _impossible_triple_rate(2, WORDS_N2)
+    denser_impossible, denser_total = _impossible_triple_rate(2, WORDS_N2_DENSER)
+    all_impossible, all_total = _impossible_triple_rate(2, WORDS_N2_ALL)
+
+    assert (sparse_impossible, sparse_total) == (4, 54)
+    assert (original_impossible, original_total) == (40, 90)
+    assert (denser_impossible, denser_total) == (26, 72)
+    assert (all_impossible, all_total) == (all_total, all_total)  # 100%: M2 unsatisfiable
+
+    # Not a strict total order across arbitrary vocabularies (denser's own
+    # 36.1% < original's 44.0%, since "more words" isn't the same axis as
+    # "more overlap") -- but the sparsest vocabulary is comfortably the
+    # least impossible, and the degenerate "everything is a word" case is
+    # comfortably the most, with the other two sitting strictly between.
+    rates = [sparse_impossible / sparse_total, original_impossible / original_total,
+             denser_impossible / denser_total]
+    assert min(rates) == sparse_impossible / sparse_total
+    assert all(r < 1.0 for r in rates)
