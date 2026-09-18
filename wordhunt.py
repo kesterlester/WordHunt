@@ -473,7 +473,7 @@ def letter_completion_stats(
 # Display
 # ---------------------------------------------------------------------------
 
-MAX_WORD_DISPLAY = 80
+MAX_WORD_DISPLAY = 1000
 
 
 def sorted_words(
@@ -641,8 +641,8 @@ def main() -> None:
 
     all_words = filter_words(words, revealed, excluded)   # full list, post-exclusion
     words = all_words
-    print_grid(revealed)
     print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+    print_grid(revealed)
 
     # --- Main interaction loop ---
     while True:
@@ -671,8 +671,8 @@ def main() -> None:
             idx = (SORT_MODES.index(sort_mode) + 1) % len(SORT_MODES)
             sort_mode = SORT_MODES[idx]
             print(f"  Sort mode -> {sort_mode}")
-            print_grid(revealed)
             print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+            print_grid(revealed)
             continue
 
         if inp.split()[:1] == ["alpha"]:
@@ -700,8 +700,8 @@ def main() -> None:
                 revealed = history.pop()
                 words = filter_words(all_words, revealed, excluded)
                 print("  Undone.")
-                print_grid(revealed)
                 print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+                print_grid(revealed)
             continue
 
         parts = inp.split()
@@ -725,8 +725,8 @@ def main() -> None:
             removed = revealed.pop(cell)
             print(f"  Removed {removed.upper()} from {cell_label(cell)}.")
             words = filter_words(all_words, revealed, excluded)
-            print_grid(revealed)
             print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+            print_grid(revealed)
             continue
 
         # --- Oracle letter report ---
@@ -761,8 +761,8 @@ def main() -> None:
 
         revealed[cell] = letter
         words = filter_words(all_words, revealed, excluded)
-        print_grid(revealed)
         print_state(words, revealed, excluded, sort_mode, freq_dict, freq_alpha)
+        print_grid(revealed)
 
 
 if __name__ == "__main__":
