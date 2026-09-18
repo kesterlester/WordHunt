@@ -315,6 +315,77 @@ class ExactSolver:
 
 
 # ---------------------------------------------------------------------------
+# TagIdentifySolver: the correct "identify-only" comparator -- M2 ONLY
+# ---------------------------------------------------------------------------
+#
+# Found 2026-09-18 while comparing MopUpSolver against ExactSolver: that
+# comparison gave mopup < identify at n=3 (3.15 vs 5.50), which is
+# impossible in principle (mop-up strictly requires at least as much
+# revealed as mere identification). Triple-checking MopUpSolver again
+# confirmed it was NOT the bug -- ExactSolver was simply answering a
+# different, harder question. ExactSolver terminates on GRID uniqueness
+# (needs all n^2 cells resolved), which was the correct fix for raw M1
+# (where tag uniqueness is sometimes an impossible target, see
+# logbook.tex). But under M2, collisions can't happen, so the cheaper,
+# unambiguous "(word,line) tag is unique" criterion is valid again and is
+# the right "reached certainty" baseline to compare MopUpSolver against.
+# Using ExactSolver for that comparison was simply the wrong tool for an
+# M2 world set, not a bug in either solver.
+# ---------------------------------------------------------------------------
+
+class TagIdentifySolver:
+    """
+    Like ExactSolver, but terminates on (word,line) TAG uniqueness rather
+    than grid uniqueness. Only valid for M2 (collision-free) world sets --
+    on raw M1 worlds this can loop forever (see ExactSolver's docstring
+    and logbook.tex's 2026-09-17 entry for the literal infinite loop this
+    produced before that fix). Use this, not ExactSolver, as the
+    "identify-only" comparator against MopUpSolver.
+    """
+
+    def __init__(self, worlds: list[World], queryable_letters: list[str]):
+        self.worlds = worlds
+        self.queryable_letters = queryable_letters
+        self._memo: "dict[frozenset, tuple[float, str | None]]" = {}
+
+    def solve(self, candidate_idx: "frozenset[int]") -> "tuple[float, str | None]":
+        cached = self._memo.get(candidate_idx)
+        if cached is not None:
+            return cached
+
+        tags = {(self.worlds[i].word, self.worlds[i].line) for i in candidate_idx}
+        if len(tags) <= 1:
+            result = (0.0, None)
+            self._memo[candidate_idx] = result
+            return result
+
+        n_total = len(candidate_idx)
+        best_letter = None
+        best_val = math.inf
+
+        for letter in self.queryable_letters:
+            buckets: "dict[Cell, list[int]]" = {}
+            for i in candidate_idx:
+                buckets.setdefault(query_outcome(self.worlds[i], letter), []).append(i)
+            if len(buckets) <= 1:
+                continue
+
+            expected = 0.0
+            for idxs in buckets.values():
+                sub = frozenset(idxs)
+                v_sub, _ = self.solve(sub)
+                expected += (len(idxs) / n_total) * v_sub
+            total = 1.0 + expected
+            if total < best_val - 1e-12:
+                best_val = total
+                best_letter = letter
+
+        result = (best_val, best_letter)
+        self._memo[candidate_idx] = result
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Greedy (one-step max information-gain) comparator
 # ---------------------------------------------------------------------------
 

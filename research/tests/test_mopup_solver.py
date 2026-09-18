@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wordlists"))
 from solver import (  # noqa: E402
     ExactSolver,
     MopUpSolver,
+    TagIdentifySolver,
     alphabet_for,
     enumerate_worlds,
     lines_for,
@@ -106,19 +107,48 @@ def test_mopup_solver_terminates_and_matches_two_independent_checks():
         assert math.isclose(v_opt, v_bruteforce_check, rel_tol=1e-9, abs_tol=1e-9), excluded
 
 
-def test_mopup_objective_is_strictly_more_expensive_than_identify_only():
+def test_mopup_objective_is_strictly_more_expensive_than_tag_identify():
     """
-    Mop-up cost is a real, positive tax: once you must spend a turn on
-    every remaining cell of the true line even after certainty, expected
-    total game length under MopUpSolver must be >= the identify-only
-    objective's value (ExactSolver, same M2 worlds), and strictly greater
-    whenever certainty can be reached before every cell is incidentally
-    revealed (true for this vocabulary at n=2: measured tax is exactly
-    0.1818 in every excluded-letter scenario -- see logbook.tex).
+    Mop-up cost is a real, positive tax over TAG certainty specifically:
+    once (word,line) is deducible, mop-up still requires directly querying
+    every remaining cell of that line, so E[mopup] >= E[tag-identify]
+    always (deducing the tag is implied by, so happens no later than,
+    completing the mandatory reveal). Measured tax at n=2 is exactly
+    0.1818 in every excluded-letter scenario -- see logbook.tex.
+
+    NOTE (found 2026-09-18, corrected the same day): this is NOT true of
+    ExactSolver's GRID-uniqueness criterion, which was wrongly assumed to
+    be an upper bound on mop-up cost. Grid uniqueness is a purely logical/
+    deductive criterion (can be satisfied by elimination without directly
+    querying every cell), so it is not operationally comparable to
+    mop-up's literal per-cell requirement -- at n=2 grid-identify (2.09)
+    is actually BELOW mopup (2.27), the opposite of what a naive "more
+    cells needed = more queries" argument would suggest. Only
+    TagIdentifySolver has a provable ordering against MopUpSolver.
     """
     for excluded in N2_EXCLUDED_SCENARIOS:
         worlds, queryable, idx = _mopup_setup(excluded)
         v_mopup, _ = MopUpSolver(worlds, queryable).solve(idx)
-        v_identify, _ = ExactSolver(worlds, queryable).solve(idx)
-        assert v_mopup >= v_identify - 1e-9
-        assert v_mopup - v_identify > 0.1, (excluded, v_mopup, v_identify)
+        v_tag, _ = TagIdentifySolver(worlds, queryable).solve(idx)
+        assert v_mopup >= v_tag - 1e-9
+        assert v_mopup - v_tag > 0.1, (excluded, v_mopup, v_tag)
+
+
+def test_grid_identify_has_no_guaranteed_ordering_against_mopup():
+    """
+    Documents, rather than merely asserting, the 2026-09-18 finding that
+    ExactSolver's grid-uniqueness value and MopUpSolver's value are NOT
+    ordered in general (unlike TagIdentifySolver, which is always <=
+    MopUpSolver). This vocabulary happens to show grid-identify BELOW
+    mopup at n=2 for every excluded letter -- recorded here so a future
+    change that "fixes" this by re-imposing an ordering assumption gets
+    caught.
+    """
+    below_count = 0
+    for excluded in N2_EXCLUDED_SCENARIOS:
+        worlds, queryable, idx = _mopup_setup(excluded)
+        v_mopup, _ = MopUpSolver(worlds, queryable).solve(idx)
+        v_grid, _ = ExactSolver(worlds, queryable).solve(idx)
+        if v_grid < v_mopup:
+            below_count += 1
+    assert below_count == len(N2_EXCLUDED_SCENARIOS)

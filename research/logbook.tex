@@ -281,14 +281,17 @@ recomputes the same expectation from scratch
 \section{Results at $n=3$: greedy is provably suboptimal}
 \label{sec:n3}
 
-\textbf{SUPERSEDED (see Section~\ref{sec:corrections}).} Computed under
-the buggy oracle. Not yet re-verified under the corrected oracle: as
-reported in Section~\ref{sec:corrections}, \texttt{ExactSolver} on full
-$n=3$ worlds did not finish within 20 seconds post-fix (it passed 700,000
-memoised states), so it is currently \emph{unknown} whether the specific
-greedy-suboptimality finding below still holds numerically, though the
-qualitative point it illustrates (greedy $\ne$ optimal in general, per the
-Mastermind/Wordle literature) does not depend on these particular numbers.
+\textbf{SUPERSEDED (see Section~\ref{sec:n3-redo}).} Computed under the
+buggy oracle. Re-verified under the corrected oracle 2026-09-18: contrary
+to the 2026-09-17 entry's claim that \texttt{ExactSolver} "did not finish
+within 20 seconds" and that this was therefore unknown, it does finish --
+in 26--42s, at 760k--1.17M memoised states, once actually given enough
+time rather than a 20s budget chosen without checking. That 2026-09-17
+claim was itself an error (impatience, not intractability) and is
+corrected in Section~\ref{sec:n3-redo}, which also confirms
+greedy-suboptimality holds in \emph{all ten} scenarios under the corrected
+oracle and $M_2$, not just 6 of 10 as below. The qualitative point (greedy
+$\ne$ optimal in general) survives either way.
 
 Toy vocabulary (alphabet \{a..j\}): $W = \{\mathrm{abc, cde, efg, ghi, ijb,
 bad, dec, fah}\}$.
@@ -536,7 +539,8 @@ evidence (not argument) that $M_2$ (with the veto step) is not an optional
 refinement -- it is needed for $M_1$ to be a reasonable model of the real
 game at all, exactly as anticipated in the original design discussion.
 
-\subsection{Consequence: exact solving got much harder, not easier}
+\subsection{Consequence: exact solving got much harder (but not
+intractable -- correction 2026-09-18)}
 
 The corrected oracle is more informative per query (up to $n^2$ distinct
 outcomes -- which cell -- versus the old model's effectively $\le n+1$),
@@ -549,6 +553,14 @@ oracle, solved in $<1$s with $\sim$100 memoised states): under the
 corrected oracle, \texttt{ExactSolver} passed 700{,}000 memoised states
 without terminating within 20 seconds. $n=2$ remains fully tractable
 (re-solved below).
+
+\emph{Correction, 2026-09-18:} the claim above that this "did not
+terminate" was wrong -- it terminates in 26.5s at 767,832 memoised states,
+comfortably within reach; 20 seconds simply wasn't tried for long enough
+before concluding intractability. This was an error of impatience, not of
+model or algorithm, but it is exactly the kind of claim this project
+exists to catch by testing rather than assuming -- see
+Section~\ref{sec:n3-redo} for the full, corrected $n=3$ re-verification.
 
 \subsection{Consequence: the (word, line) sufficiency lemma is retracted}
 
@@ -613,26 +625,37 @@ actually care about.
 
 \textbf{Resolved 2026-09-18 (see Section~\ref{sec:mopup}):} neither the
 grid-uniqueness termination above nor the closer-to-real guess was right.
-There are three distinct candidate stopping rules, and they are strictly
-ordered by how many queries they typically take: (a) logical certainty
-(the candidate set collapses to one designated pair) -- happens soonest,
-but the real game does \emph{not} stop here, it grants no early exit for
-merely knowing the answer; (b) the whole $n^2$-cell grid revealed (what
-grid-uniqueness termination actually demanded) -- happens latest, and is
-\emph{more} than the real game requires, since cells off the true line
-never need to be revealed at all; (c) exactly the true line's own $n$
-cells revealed, regardless of the other $n^2-n$ cells' state -- this is
-the real rule. (a) $\le$ (c) $\le$ (b) in expected query count, generally strictly, for
-the same underlying world population. (The 2.944 figure isn't directly
-comparable to Section~\ref{sec:mopup}'s numbers below, since it was
-computed under raw $M_1$ -- collisions and all -- rather than the
-collision-free $M_2$ used there; but the structural point that grid-wide
-termination (b) overshoots the real rule (c), rather than the real rule
-being more lenient than logical certainty (a), stands regardless of which
-world population is used.) See Section~\ref{sec:mopup} for the corrected
-objective, its exact solver, and real numbers under (c).
+There are three distinct quantities in play: (a) logical tag certainty
+(the candidate set collapses to one designated $(w,p)$ pair by
+elimination) -- but the real game does \emph{not} stop here, it grants no
+early exit for merely knowing the answer; (b) logical grid certainty (all
+$n^2$ cells' values are deducible by elimination) -- also not the real
+rule, and \emph{also not simply "more than" (a) and (c) in the way first
+assumed here}; (c) the true line's own $n$ cells \emph{operationally,
+individually queried} (not merely deducible) -- this is the real rule.
 
-\section{2026-09-18: the real scoring rule, and $M_2$ at $n=2$}
+\textbf{A same-day second correction, since the first attempt above (in
+the version of this paragraph originally written) also got it wrong:} it
+claimed (a) $\le$ (c) $\le$ (b) always. That is false, and Section~\ref{sec:mopup}
+found the counterexample directly rather than by further armchair
+reasoning: at $n=2$, grid-certainty (b) is measured at 2.09, strictly
+\emph{below} mop-up (c) at 2.27. The reason is that (a) and (b) are both
+\emph{deductive} quantities -- reachable purely by elimination, without
+ever directly querying the cells they concern -- while (c) is an
+\emph{operational} one: mop-up specifically requires those $n$ cells to
+have been individually, directly queried, with no shortcut via inference.
+Deduction can outrun the mandatory direct reveal or fall behind it
+depending on how much cross-referencing power the vocabulary structure
+gives elimination, so (b) and (c) are simply not ordered in general. What
+\emph{is} always true, because it is a logical implication rather than an
+empirical race: (a) $\le$ (b) (grid certainty implies tag certainty) and
+(a) $\le$ (c) (completing mop-up implies you now know the tag too, but
+tag certainty could have arrived earlier by elimination). See
+Section~\ref{sec:mopup}'s \texttt{TagIdentifySolver} for the solver that
+is actually valid to compare \texttt{MopUpSolver} against, and why
+\texttt{ExactSolver} (grid-based) is not.
+
+\section{2026-09-18: the real scoring rule, $M_2$ at $n=2$, and $n=3$ redone}
 \label{sec:mopup}
 
 Two points raised by review of the previous day's entry, both real and
@@ -754,22 +777,35 @@ see"). All three agree exactly, for every excluded-letter scenario.
 
 \subsection{Results at $n=2$, $M_2$, mop-up-aware objective}
 
+\textbf{Correction, same day:} "identify-only" below is
+\texttt{TagIdentifySolver} (tag/certainty-based termination), not
+\texttt{ExactSolver} (grid-based termination) as originally computed here
+-- they are NOT interchangeable in general (see the correction to
+Section~\ref{sec:corrections}'s resolved note, and
+Section~\ref{sec:n3-redo} below for the counterexample that exposed this).
+At $n=2$ specifically the two happen to coincide exactly (both 2.0909 for
+every excluded letter, confirmed directly), so the numbers below are
+unchanged -- but that coincidence does not hold at $n=3$, where they
+diverge substantially, so this table's agreement should not be read as
+"it doesn't matter which one you use."
+
 \begin{center}
-\begin{tabular}{cccc}
+\begin{tabular}{ccccc}
 \toprule
-excluded & $M_2$ worlds & identify-only $\mathbb{E}[T]$ & mop-up-aware $\mathbb{E}[T]$ \\
+excluded & $M_2$ worlds & tag-identify $\mathbb{E}[T]$ & grid-identify $\mathbb{E}[T]$ & mop-up-aware $\mathbb{E}[T]$ \\
 \midrule
-a & 11 & 2.0909 & 2.2727 \\
-b & 11 & 2.0909 & 2.2727 \\
-c & 11 & 2.0909 & 2.2727 \\
-d & 11 & 2.0909 & 2.2727 \\
-e & 11 & 2.0909 & 2.2727 \\
+a & 11 & 2.0909 & 2.0909 & 2.2727 \\
+b & 11 & 2.0909 & 2.0909 & 2.2727 \\
+c & 11 & 2.0909 & 2.0909 & 2.2727 \\
+d & 11 & 2.0909 & 2.0909 & 2.2727 \\
+e & 11 & 2.0909 & 2.0909 & 2.2727 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The mop-up tax is exactly $0.1818$ queries in every scenario for this
-vocabulary (identical across scenarios only because of this particular
+The mop-up tax (over tag-identify, the only comparator with a proven
+ordering against mop-up) is exactly $0.1818$ queries in every scenario for
+this vocabulary (identical across scenarios only because of this particular
 word list's cyclic symmetry, not a general law). Note $M_2$'s hypothesis
 space is much smaller than $M_1$'s raw one -- 11 surviving worlds here
 versus 36 under raw $M_1$ -- a direct, visible consequence of the 44\%
@@ -784,6 +820,91 @@ letters per line and very little room for the double-duty effect
 described above to bite on move one specifically. Worth deliberately
 checking for divergence at $n=3$, where a query has more structure to
 exploit, rather than assuming $n=2$'s coincidence generalises.
+
+\subsection{$n=3$, redone and confirmed complete}
+\label{sec:n3-redo}
+
+Prompted directly by "n=3 next?": rather than assume Section~\ref{sec:n3}
+and Section~\ref{sec:corrections}'s "does not terminate" finding, it was
+re-tried with more patience, and the assumption was wrong.
+
+\textbf{$n=3$ identify-only IS tractable from the opening -- correction.}
+\texttt{ExactSolver} on the full $M_2$-filtered $n=3$ opening state
+finishes in 26--42 seconds (760k--1.17M memoised states) depending on
+excluded letter, not ``$>$20s, not observed to terminate'' as
+Section~\ref{sec:corrections} claimed. That claim was simply given too
+short a budget before being written down as a finding -- a real
+methodological lapse (impatience presented as a result), corrected here
+by actually letting it run. Diagnostic: the branching factor really is
+$n^2=9$ distinct outcome cells per query at the root (measured directly),
+which is why 20s undersells it without being remotely infeasible.
+
+\begin{center}
+\begin{tabular}{ccccc}
+\toprule
+excluded & $M_2$ worlds & optimal $\mathbb{E}[\text{queries}]$ & greedy & solve time \\
+\midrule
+a & 27{,}420 & 6.0377 & \textbf{6.1411} & 26.5s \\
+b & 27{,}558 & 5.9990 & \textbf{6.1053} & 29.1s \\
+c & 26{,}922 & 6.0069 & \textbf{6.0685} & 28.9s \\
+d & 27{,}462 & 6.0126 & \textbf{6.0875} & 27.0s \\
+e & 27{,}144 & 5.9909 & \textbf{6.0680} & 26.0s \\
+f & 32{,}376 & 6.1005 & \textbf{6.2117} & 33.5s \\
+g & 32{,}126 & 6.0755 & \textbf{6.2046} & 33.9s \\
+h & 32{,}424 & 6.0907 & \textbf{6.1515} & 33.7s \\
+i & 32{,}100 & 6.0630 & \textbf{6.1561} & 33.6s \\
+j & 37{,}014 & 6.1770 & \textbf{6.2621} & 41.9s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Finding 2, strengthened.} Greedy is strictly worse than optimal in
+\emph{all ten} excluded-letter scenarios under the corrected oracle and
+$M_2$ (previously 6 of 10, under the buggy oracle and raw $M_1$) -- not a
+weaker result than the original Finding 2, a stronger one. This is now
+the load-bearing confirmation that one-step maximum-entropy selection is
+not optimal play, on the actually-correct model, not the retracted one.
+
+\textbf{MopUpSolver at $n=3$, against the correct comparator.} The first
+attempt at this comparison used \texttt{ExactSolver} (grid-based) as
+"identify-only" and got mopup $<$ identify (4.02 vs 6.04) -- apparently
+impossible, since mop-up can only add cost over mere certainty, never
+remove it. Triple-checking \texttt{MopUpSolver} again confirmed it was NOT
+the bug (all three independent checks still agreed exactly, even on a
+small fast sub-case). The bug was in the comparison itself: grid-based
+certainty is not a valid lower bound on mop-up cost at all (see the
+corrected note on Section~\ref{sec:corrections}'s resolved paragraph,
+above) -- only \texttt{TagIdentifySolver} (tag-based certainty) has a
+proven ordering against \texttt{MopUpSolver}. Redone with the right
+comparator:
+
+\begin{center}
+\begin{tabular}{ccccc}
+\toprule
+excluded & $M_2$ worlds & tag-identify & mop-up-aware & tax \\
+\midrule
+a & 27{,}420 & 3.3700 & 4.0161 & 0.6461 \\
+b & 27{,}558 & 3.3060 & 3.9792 & 0.6733 \\
+c & 26{,}922 & 3.5938 & 4.2672 & 0.6734 \\
+d & 27{,}462 & 3.5741 & 4.2423 & 0.6682 \\
+e & 27{,}144 & 3.2555 & 3.8767 & 0.6212 \\
+f & 32{,}376 & 3.5607 & 4.1069 & 0.5463 \\
+g & 32{,}126 & 3.5576 & 4.1672 & 0.6096 \\
+h & 32{,}424 & 3.4869 & 4.1172 & 0.6302 \\
+i & 32{,}100 & 3.4886 & 4.1031 & 0.6145 \\
+j & 37{,}014 & 3.8287 & 4.4244 & 0.5956 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every scenario correctly satisfies tag-identify $\le$ mop-up (unlike the
+first, buggy-comparator attempt). The mop-up tax at $n=3$ (0.55--0.67
+queries) is roughly $3$--$4\times$ the $n=2$ tax (0.18 queries) -- weak
+evidence, from two data points, that the tax grows with $n$ (more cells
+per line to mop up), but not something to extrapolate confidently from
+yet. \texttt{MopUpSolver} itself needed 45--80s per scenario here (3.46M--
+4.53M memoised states), noticeably more than \texttt{TagIdentifySolver}'s
+21--33s, consistent with the richer $(H,\mathrm{Rev})$ state.
 
 \subsection{Status / next steps for this thread}
 
